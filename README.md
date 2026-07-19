@@ -1,7 +1,7 @@
 # DevHQ prototype
 
-A minimal native macOS code editor built with SwiftUI and AppKit's `NSTextView`.
-Syntax highlighting uses CodeEdit's GitHub-hosted language bundle with SwiftTreeSitter.
+A minimal native macOS code editor built with SwiftUI and CodeEditSourceEditor.
+The editor includes syntax highlighting, line numbers, code folding, and a minimap.
 
 ## Run
 

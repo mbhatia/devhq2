@@ -4,14 +4,22 @@ import XCTest
 import CodeEditLanguages
 
 final class DevHQTests: XCTestCase {
-    func testSwiftTreeSitterHighlightsCode() {
-        let text = "struct Example { let value = 42 }"
-        XCTAssertNotNil(CodeLanguage.swift.language, "Swift parser language should load")
-        XCTAssertNotNil(CodeLanguage.swift.queryURL, "Swift highlight query resource should load")
-        let tokens = TreeSitterHighlighter.tokens(in: text, language: .swift)
+    func testSourceEditorFeaturesAreEnabled() {
+        let configuration = SourceEditorView.configuration(isDark: false)
 
-        XCTAssertFalse(tokens.isEmpty)
-        XCTAssertTrue(tokens.contains { $0.name.hasPrefix("keyword") })
+        XCTAssertTrue(configuration.peripherals.showGutter)
+        XCTAssertTrue(configuration.peripherals.showMinimap)
+        XCTAssertTrue(configuration.peripherals.showFoldingRibbon)
+    }
+
+    @MainActor
+    func testSwiftSyntaxHighlightingProducesKeywordCapture() {
+        let highlights = CorrectedTreeSitterHighlightProvider.highlights(
+            in: "struct Example { let value = 42 }",
+            language: .swift
+        )
+
+        XCTAssertTrue(highlights.contains { $0.capture == .keyword })
     }
 
     @MainActor

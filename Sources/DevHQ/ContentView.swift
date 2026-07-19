@@ -213,7 +213,7 @@ private struct FileEditor: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        SyntaxTextView(
+        SourceEditorView(
             text: Binding(get: { document.text }, set: { document.text = $0 }),
             language: document.language,
             isDark: colorScheme == .dark
