@@ -42,6 +42,27 @@ final class TreeModel<ID: Hashable, Value>: ObservableObject {
         }
     }
 
+    @discardableResult
+    func reveal(_ id: ID) -> Bool {
+        guard let ancestors = ancestors(of: id, in: roots) else { return false }
+        expandedIDs.formUnion(ancestors)
+        return true
+    }
+
+    private func ancestors(
+        of id: ID,
+        in nodes: [TreeNode<ID, Value>]
+    ) -> [ID]? {
+        for node in nodes {
+            if node.id == id { return [] }
+            if let children = node.children,
+               let childAncestors = ancestors(of: id, in: children) {
+                return [node.id] + childAncestors
+            }
+        }
+        return nil
+    }
+
     private static func expandedIDs(
         in nodes: [TreeNode<ID, Value>],
         remainingLevels: Int

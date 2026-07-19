@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TreeView<ID: Hashable, Value, RowContent: View>: View {
     @ObservedObject var model: TreeModel<ID, Value>
+    let selectedID: ID?
     let onSelect: (TreeNode<ID, Value>) -> Void
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
 
@@ -9,6 +10,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
         TreeRows(
             nodes: model.roots,
             model: model,
+            selectedID: selectedID,
             level: 0,
             onSelect: onSelect,
             rowContent: rowContent
@@ -19,6 +21,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
 private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
     let nodes: [TreeNode<ID, Value>]
     @ObservedObject var model: TreeModel<ID, Value>
+    let selectedID: ID?
     let level: Int
     let onSelect: (TreeNode<ID, Value>) -> Void
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
@@ -43,6 +46,13 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.leading, CGFloat(level * 14))
+                    .padding(.vertical, 2)
+                    .background(
+                        node.id == selectedID
+                            ? Color.accentColor.opacity(0.22)
+                            : Color.clear
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -51,6 +61,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                     TreeRows(
                         nodes: children,
                         model: model,
+                        selectedID: selectedID,
                         level: level + 1,
                         onSelect: onSelect,
                         rowContent: rowContent

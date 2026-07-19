@@ -18,12 +18,14 @@ extension TreeNode where ID == String, Value == FileItem {
 final class EditorDocument: ObservableObject, Identifiable {
     let id = UUID()
     let url: URL
+    let treeNodeID: String?
     let language: CodeLanguage
     @Published var text: String
     private(set) var savedText: String
 
-    init(url: URL, text: String) {
+    init(url: URL, text: String, treeNodeID: String? = nil) {
         self.url = url
+        self.treeNodeID = treeNodeID
         self.text = text
         self.savedText = text
         self.language = CodeLanguage.detectLanguageFrom(
@@ -53,6 +55,8 @@ final class WorkspaceModel: ObservableObject {
         documents.first { $0.id == selectedDocumentID }
     }
 
+    var selectedFileNodeID: String? { selectedDocument?.treeNodeID }
+
     init(arguments: [String] = CommandLine.arguments) {
         openCommandLineWorkspace(arguments)
     }
@@ -70,34 +74,42 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func openWorkspace(_ url: URL) {
-        rootURL = url.standardizedFileURL
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        rootURL = url
         documents = []
         selectedDocumentID = nil
-        fileTree.replaceRoots(loadChildren(of: url))
+        fileTree.replaceRoots(loadChildren(of: url, relativePath: ""))
     }
 
     func open(_ node: FileNode) {
         guard !node.isDirectory else { return }
-        openFile(node.url)
+        openFile(node.url, treeNodeID: node.id)
     }
 
     func openFile(_ url: URL) {
-        if let document = documents.first(where: { $0.url == url }) {
-            selectedDocumentID = document.id
+        openFile(url, treeNodeID: fileNodeID(for: url))
+    }
+
+    private func openFile(_ url: URL, treeNodeID: String?) {
+        let url = url.standardizedFileURL
+        if let document = documents.first(where: {
+            treeNodeID != nil ? $0.treeNodeID == treeNodeID : $0.url == url
+        }) {
+            activate(document)
             return
         }
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
-            let document = EditorDocument(url: url, text: text)
+            let document = EditorDocument(url: url, text: text, treeNodeID: treeNodeID)
             documents.append(document)
-            selectedDocumentID = document.id
+            activate(document)
         } catch {
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
     }
 
     func select(_ document: EditorDocument) {
-        selectedDocumentID = document.id
+        activate(document)
     }
 
     func close(_ document: EditorDocument) {
@@ -107,6 +119,11 @@ final class WorkspaceModel: ObservableObject {
             selectedDocumentID = documents.indices.contains(index)
                 ? documents[index].id
                 : documents.last?.id
+            if let selectedDocument {
+                if let treeNodeID = selectedDocument.treeNodeID {
+                    fileTree.reveal(treeNodeID)
+                }
+            }
         }
     }
 
@@ -120,7 +137,14 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
-    private func loadChildren(of directory: URL) -> [FileNode] {
+    private func activate(_ document: EditorDocument) {
+        selectedDocumentID = document.id
+        if let treeNodeID = document.treeNodeID {
+            fileTree.reveal(treeNodeID)
+        }
+    }
+
+    private func loadChildren(of directory: URL, relativePath: String) -> [FileNode] {
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         let ignored = Set([".git", ".build", "DerivedData", ".DS_Store"])
         guard let urls = try? FileManager.default.contentsOfDirectory(
@@ -133,21 +157,33 @@ final class WorkspaceModel: ObservableObject {
             guard !ignored.contains(url.lastPathComponent),
                   let values = try? url.resourceValues(forKeys: keys),
                   values.isSymbolicLink != true else { return nil }
+            let nodeID = relativePath.isEmpty
+                ? url.lastPathComponent
+                : relativePath + "/" + url.lastPathComponent
             if values.isDirectory == true {
                 return FileNode(
-                    id: url.path,
+                    id: nodeID,
                     value: FileItem(url: url),
-                    children: loadChildren(of: url)
+                    children: loadChildren(of: url, relativePath: nodeID)
                 )
             }
             return values.isRegularFile == true
-                ? FileNode(id: url.path, value: FileItem(url: url), children: nil)
+                ? FileNode(id: nodeID, value: FileItem(url: url), children: nil)
                 : nil
         }
         .sorted {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+
+    private func fileNodeID(for url: URL) -> String? {
+        guard let rootURL else { return nil }
+        let rootComponents = rootURL.standardizedFileURL.pathComponents
+        let fileComponents = url.standardizedFileURL.pathComponents
+        guard fileComponents.starts(with: rootComponents),
+              fileComponents.count > rootComponents.count else { return nil }
+        return fileComponents.dropFirst(rootComponents.count).joined(separator: "/")
     }
 
     private func openCommandLineWorkspace(_ arguments: [String]) {

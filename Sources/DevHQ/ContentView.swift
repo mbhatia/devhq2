@@ -72,7 +72,10 @@ private struct Sidebar: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    TreeView(model: workspace.fileTree) { node in
+                    TreeView(
+                        model: workspace.fileTree,
+                        selectedID: workspace.selectedFileNodeID
+                    ) { node in
                         workspace.open(node)
                     } rowContent: { node in
                         FileRow(node: node)
