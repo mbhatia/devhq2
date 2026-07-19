@@ -4,6 +4,23 @@ import XCTest
 import CodeEditLanguages
 
 final class DevHQTests: XCTestCase {
+    @MainActor
+    func testTreeStartsWithOnlyFirstLevelExpandedAndCanToggle() {
+        let nestedBranch = TreeNode(id: "nested", value: 2, children: [
+            TreeNode(id: "leaf", value: 3, children: nil)
+        ])
+        let rootBranch = TreeNode(id: "root", value: 1, children: [nestedBranch])
+        let model = TreeModel(roots: [rootBranch])
+
+        XCTAssertTrue(model.isExpanded(rootBranch))
+        XCTAssertFalse(model.isExpanded(nestedBranch))
+
+        model.toggle(nestedBranch)
+        XCTAssertTrue(model.isExpanded(nestedBranch))
+        model.toggle(rootBranch)
+        XCTAssertFalse(model.isExpanded(rootBranch))
+    }
+
     func testSourceEditorFeaturesAreEnabled() {
         let configuration = SourceEditorView.configuration(isDark: false)
 

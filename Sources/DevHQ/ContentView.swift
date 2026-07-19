@@ -72,39 +72,18 @@ private struct Sidebar: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    FileTree(nodes: workspace.nodes, workspace: workspace)
+                    TreeView(model: workspace.fileTree) { node in
+                        workspace.open(node)
+                    } rowContent: { node in
+                        FileRow(node: node)
+                    }
+                    .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                 }
                 .background(Color(nsColor: .controlBackgroundColor))
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-    }
-}
-
-private struct FileTree: View {
-    let nodes: [FileNode]
-    @ObservedObject var workspace: WorkspaceModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(nodes) { node in
-                if let children = node.children {
-                    DisclosureGroup(isExpanded: .constant(true)) {
-                        FileTree(nodes: children, workspace: workspace)
-                            .padding(.leading, 12)
-                    } label: {
-                        FileRow(node: node)
-                    }
-                } else {
-                    FileRow(node: node)
-                        .contentShape(Rectangle())
-                        .onTapGesture { workspace.open(node) }
-                }
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

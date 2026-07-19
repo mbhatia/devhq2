@@ -2,13 +2,17 @@ import AppKit
 import CodeEditLanguages
 import Foundation
 
-struct FileNode: Identifiable {
+struct FileItem {
     let url: URL
-    let children: [FileNode]?
-
-    var id: String { url.path }
     var name: String { url.lastPathComponent }
-    var isDirectory: Bool { children != nil }
+}
+
+typealias FileNode = TreeNode<String, FileItem>
+
+extension TreeNode where ID == String, Value == FileItem {
+    var url: URL { value.url }
+    var name: String { value.name }
+    var isDirectory: Bool { isBranch }
 }
 
 final class EditorDocument: ObservableObject, Identifiable {
@@ -40,7 +44,7 @@ final class EditorDocument: ObservableObject, Identifiable {
 @MainActor
 final class WorkspaceModel: ObservableObject {
     @Published private(set) var rootURL: URL?
-    @Published private(set) var nodes: [FileNode] = []
+    let fileTree = TreeModel<String, FileItem>()
     @Published private(set) var documents: [EditorDocument] = []
     @Published var selectedDocumentID: UUID?
     @Published var errorMessage: String?
@@ -69,7 +73,7 @@ final class WorkspaceModel: ObservableObject {
         rootURL = url.standardizedFileURL
         documents = []
         selectedDocumentID = nil
-        nodes = loadChildren(of: url)
+        fileTree.replaceRoots(loadChildren(of: url))
     }
 
     func open(_ node: FileNode) {
@@ -130,9 +134,15 @@ final class WorkspaceModel: ObservableObject {
                   let values = try? url.resourceValues(forKeys: keys),
                   values.isSymbolicLink != true else { return nil }
             if values.isDirectory == true {
-                return FileNode(url: url, children: loadChildren(of: url))
+                return FileNode(
+                    id: url.path,
+                    value: FileItem(url: url),
+                    children: loadChildren(of: url)
+                )
             }
-            return values.isRegularFile == true ? FileNode(url: url, children: nil) : nil
+            return values.isRegularFile == true
+                ? FileNode(id: url.path, value: FileItem(url: url), children: nil)
+                : nil
         }
         .sorted {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
