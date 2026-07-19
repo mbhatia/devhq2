@@ -1,4 +1,5 @@
 import Foundation
+import DevHQLua
 import Lua
 import SwiftUI
 
@@ -16,9 +17,37 @@ enum WindowTheme: String {
     }
 }
 
+extension WindowTheme: LuaPluginValue {
+    func push(onto state: LuaPluginState) {
+        state.push(rawValue)
+    }
+
+    static func read(from state: LuaPluginState, at index: CInt) throws -> WindowTheme {
+        let value = try String.read(from: state, at: index)
+        guard let theme = WindowTheme(rawValue: value) else {
+            throw PluginAPIError.invalidValue("theme", value)
+        }
+        return theme
+    }
+}
+
 enum SplitDirection: String {
     case horizontal
     case vertical
+}
+
+extension SplitDirection: LuaPluginValue {
+    func push(onto state: LuaPluginState) {
+        state.push(rawValue)
+    }
+
+    static func read(from state: LuaPluginState, at index: CInt) throws -> SplitDirection {
+        let value = try String.read(from: state, at: index)
+        guard let direction = SplitDirection(rawValue: value) else {
+            throw PluginAPIError.invalidValue("split direction", value)
+        }
+        return direction
+    }
 }
 
 @MainActor
@@ -41,6 +70,169 @@ private enum PluginAPIError: LocalizedError {
         case let .invalidValue(kind, value):
             "Invalid \(kind) value: \(value)"
         }
+    }
+}
+
+@MainActor
+@LuaModule("core")
+private final class LuaCoreAPI {
+    @LuaField("api_version")
+    let apiVersion: String
+
+    @LuaField("config_dir")
+    let configDirectory: String
+
+    init(apiVersion: String, configDirectory: String) {
+        self.apiVersion = apiVersion
+        self.configDirectory = configDirectory
+    }
+
+    @LuaFunction("log")
+    func log(_ message: String) {
+        print("[devhq.lua] \(message)")
+    }
+}
+
+@MainActor
+@LuaModule("window")
+private final class LuaWindowAPI {
+    let settings: EditorSettings
+
+    init(settings: EditorSettings) {
+        self.settings = settings
+    }
+
+    @LuaField("theme")
+    var theme: WindowTheme {
+        get { settings.windowTheme }
+        set { settings.windowTheme = newValue }
+    }
+
+    @LuaFunction("set_theme")
+    func setTheme(_ value: String) throws {
+        guard let theme = WindowTheme(rawValue: value) else {
+            throw PluginAPIError.invalidValue("theme", value)
+        }
+        self.theme = theme
+    }
+
+    @LuaFunction("get_theme")
+    func getTheme() -> String {
+        theme.rawValue
+    }
+}
+
+@MainActor
+@LuaModule("split")
+private final class LuaSplitAPI {
+    let settings: EditorSettings
+
+    init(settings: EditorSettings) {
+        self.settings = settings
+    }
+
+    @LuaField("direction")
+    var direction: SplitDirection {
+        get { settings.splitDirection }
+        set { settings.splitDirection = newValue }
+    }
+
+    @LuaFunction("set_direction")
+    func setDirection(_ value: String) throws {
+        guard let direction = SplitDirection(rawValue: value) else {
+            throw PluginAPIError.invalidValue("split direction", value)
+        }
+        self.direction = direction
+    }
+
+    @LuaFunction("get_direction")
+    func getDirection() -> String {
+        direction.rawValue
+    }
+}
+
+@MainActor
+@LuaModule("treeview")
+private final class LuaTreeViewAPI {
+    let settings: EditorSettings
+
+    init(settings: EditorSettings) {
+        self.settings = settings
+    }
+
+    @LuaField("visible")
+    var visible: Bool {
+        get { settings.treeViewVisible }
+        set { settings.treeViewVisible = newValue }
+    }
+
+    @LuaField("size")
+    var size: Double {
+        get { settings.treeViewSize }
+        set { settings.treeViewSize = min(max(newValue, 120), 600) }
+    }
+
+    @LuaFunction("set_visible")
+    func setVisible(_ visible: Bool) {
+        self.visible = visible
+    }
+
+    @LuaFunction("is_visible")
+    func isVisible() -> Bool {
+        visible
+    }
+
+    @LuaFunction("set_size")
+    func setSize(_ size: Double) {
+        self.size = size
+    }
+
+    @LuaFunction("get_size")
+    func getSize() -> Double {
+        size
+    }
+}
+
+@MainActor
+@LuaModule("docview")
+private final class LuaDocViewAPI {
+    let settings: EditorSettings
+
+    init(settings: EditorSettings) {
+        self.settings = settings
+    }
+
+    @LuaField("gutter")
+    var gutter: Bool {
+        get { settings.showGutter }
+        set { settings.showGutter = newValue }
+    }
+
+    @LuaField("minimap")
+    var minimap: Bool {
+        get { settings.showMinimap }
+        set { settings.showMinimap = newValue }
+    }
+
+    @LuaField("folding")
+    var folding: Bool {
+        get { settings.showFoldingRibbon }
+        set { settings.showFoldingRibbon = newValue }
+    }
+
+    @LuaFunction("set_gutter")
+    func setGutter(_ visible: Bool) {
+        gutter = visible
+    }
+
+    @LuaFunction("set_minimap")
+    func setMinimap(_ visible: Bool) {
+        minimap = visible
+    }
+
+    @LuaFunction("set_folding")
+    func setFolding(_ visible: Bool) {
+        folding = visible
     }
 }
 
@@ -100,13 +292,19 @@ final class LuaPluginHost: ObservableObject {
     }
 
     private func registerModule() throws {
-        let openModule: LuaClosure = { [settings, configDirectory] state in
-            state.newtable(nrec: 5)
-            Self.addCore(to: state, configDirectory: configDirectory)
-            Self.addWindow(to: state, settings: settings)
-            Self.addSplit(to: state, settings: settings)
-            Self.addTreeView(to: state, settings: settings)
-            Self.addDocView(to: state, settings: settings)
+        let modules: [any LuaModuleRegistrable] = [
+            LuaCoreAPI(apiVersion: Self.apiVersion, configDirectory: configDirectory.path),
+            LuaWindowAPI(settings: settings),
+            LuaSplitAPI(settings: settings),
+            LuaTreeViewAPI(settings: settings),
+            LuaDocViewAPI(settings: settings)
+        ]
+        let openModule: LuaClosure = { state in
+            state.newtable(nrec: CInt(modules.count))
+            for module in modules {
+                module.pushLuaTable(onto: state)
+                state.rawset(-2, utf8Key: module.luaName)
+            }
             return 1
         }
         try state.requiref(name: "devhq", global: false) {
@@ -114,100 +312,4 @@ final class LuaPluginHost: ObservableObject {
         }
     }
 
-    private static func addCore(to state: LuaState, configDirectory: URL) {
-        state.newtable(nrec: 3)
-        state.push(apiVersion)
-        state.rawset(-2, utf8Key: "api_version")
-        state.push(configDirectory.path)
-        state.rawset(-2, utf8Key: "config_dir")
-        function("log", in: state) { state in
-            print("[devhq.lua] \(state.tostring(1, convert: true) ?? "")")
-            return 0
-        }
-        state.rawset(-2, utf8Key: "core")
-    }
-
-    private static func addWindow(to state: LuaState, settings: EditorSettings) {
-        state.newtable(nrec: 2)
-        function("set_theme", in: state) { state in
-            let value = state.tostring(1) ?? ""
-            guard let theme = WindowTheme(rawValue: value) else {
-                throw PluginAPIError.invalidValue("theme", value)
-            }
-            settings.windowTheme = theme
-            return 0
-        }
-        function("get_theme", in: state) { state in
-            state.push(settings.windowTheme.rawValue)
-            return 1
-        }
-        state.rawset(-2, utf8Key: "window")
-    }
-
-    private static func addSplit(to state: LuaState, settings: EditorSettings) {
-        state.newtable(nrec: 2)
-        function("set_direction", in: state) { state in
-            let value = state.tostring(1) ?? ""
-            guard let direction = SplitDirection(rawValue: value) else {
-                throw PluginAPIError.invalidValue("split direction", value)
-            }
-            settings.splitDirection = direction
-            return 0
-        }
-        function("get_direction", in: state) { state in
-            state.push(settings.splitDirection.rawValue)
-            return 1
-        }
-        state.rawset(-2, utf8Key: "split")
-    }
-
-    private static func addTreeView(to state: LuaState, settings: EditorSettings) {
-        state.newtable(nrec: 4)
-        function("set_visible", in: state) { state in
-            settings.treeViewVisible = state.toboolean(1)
-            return 0
-        }
-        function("is_visible", in: state) { state in
-            state.push(settings.treeViewVisible)
-            return 1
-        }
-        function("set_size", in: state) { state in
-            guard let value = state.tonumber(1) else {
-                throw PluginAPIError.invalidValue("tree view size", "non-number")
-            }
-            settings.treeViewSize = min(max(value, 120), 600)
-            return 0
-        }
-        function("get_size", in: state) { state in
-            state.push(settings.treeViewSize)
-            return 1
-        }
-        state.rawset(-2, utf8Key: "treeview")
-    }
-
-    private static func addDocView(to state: LuaState, settings: EditorSettings) {
-        state.newtable(nrec: 3)
-        function("set_gutter", in: state) { state in
-            settings.showGutter = state.toboolean(1)
-            return 0
-        }
-        function("set_minimap", in: state) { state in
-            settings.showMinimap = state.toboolean(1)
-            return 0
-        }
-        function("set_folding", in: state) { state in
-            settings.showFoldingRibbon = state.toboolean(1)
-            return 0
-        }
-        state.rawset(-2, utf8Key: "docview")
-    }
-
-    private static func function(
-        _ name: String,
-        in state: LuaState,
-        body: @escaping LuaClosure
-    ) {
-        state.push(body)
-        state.rawset(-2, utf8Key: name)
-    }
 }

@@ -1,6 +1,7 @@
 // swift-tools-version: 5.9
 
 import PackageDescription
+import CompilerPluginSupport
 
 let package = Package(
     name: "DevHQ",
@@ -26,9 +27,29 @@ let package = Package(
             url: "https://github.com/tomsci/LuaSwift.git",
             exact: "1.0.0"
         ),
+        .package(
+            url: "https://github.com/swiftlang/swift-syntax.git",
+            exact: "603.0.2"
+        ),
         .package(path: "Vendor/CodeEditSymbols")
     ],
     targets: [
+        .macro(
+            name: "DevHQLuaMacros",
+            dependencies: [
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax")
+            ]
+        ),
+        .target(
+            name: "DevHQLua",
+            dependencies: [
+                "DevHQLuaMacros",
+                .product(name: "Lua", package: "LuaSwift")
+            ]
+        ),
         .executableTarget(
             name: "DevHQ",
             dependencies: [
@@ -36,12 +57,13 @@ let package = Package(
                 .product(name: "CodeEditSourceEditor", package: "CodeEditSourceEditor"),
                 .product(name: "CodeEditTextView", package: "CodeEditTextView"),
                 .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter"),
-                .product(name: "Lua", package: "LuaSwift")
+                .product(name: "Lua", package: "LuaSwift"),
+                "DevHQLua"
             ]
         ),
         .testTarget(
             name: "DevHQTests",
-            dependencies: ["DevHQ"]
+            dependencies: ["DevHQ", "DevHQLua"]
         )
     ]
 )

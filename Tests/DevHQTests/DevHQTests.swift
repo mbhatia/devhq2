@@ -2,8 +2,76 @@ import Foundation
 import XCTest
 @testable import DevHQ
 import CodeEditLanguages
+import DevHQLua
+
+private enum LuaMacroFixtureError: Error {
+    case rejected
+}
+
+@MainActor
+@LuaModule("fixture")
+public final class LuaMacroFixture {
+    @LuaField("label")
+    var label: String
+
+    @LuaField("identifier")
+    let identifier: String
+
+    init(label: String, identifier: String) {
+        self.label = label
+        self.identifier = identifier
+    }
+
+    @LuaFunction("describe")
+    func describe(_ state: String, count: Int, enabled: Bool) -> String {
+        "\(state):\(count):\(enabled)"
+    }
+
+    @LuaFunction("reject")
+    func reject() throws {
+        throw LuaMacroFixtureError.rejected
+    }
+}
 
 final class DevHQTests: XCTestCase {
+    @MainActor
+    func testLuaMacrosExposeFieldsTypedMethodsAndErrors() throws {
+        let state = LuaPluginState(libraries: .all)
+        defer { state.close() }
+
+        let fixture = LuaMacroFixture(label: "generated", identifier: "fixed")
+        fixture.pushLuaTable(onto: state)
+        state.setglobal(name: fixture.luaName)
+        fixture.label = "changed-in-swift"
+
+        try state.dostring("""
+        assert(fixture.label == "changed-in-swift")
+        fixture.label = "changed-in-lua"
+        assert(fixture.label == "changed-in-lua")
+        assert(fixture.identifier == "fixed")
+        assert(fixture.describe("item", 3, true) == "item:3:true")
+
+        local changed_identifier, field_error = pcall(function()
+          fixture.identifier = "replacement"
+        end)
+        assert(not changed_identifier)
+        assert(string.find(field_error, "read%-only"))
+
+        fixture.plugin_value = "allowed"
+        assert(fixture.plugin_value == "allowed")
+
+        local valid_argument, argument_error = pcall(fixture.describe, "item", "three", true)
+        assert(not valid_argument)
+        assert(string.find(argument_error, "argument 2"))
+
+        local accepted = pcall(fixture.reject)
+        assert(not accepted)
+        """)
+
+        XCTAssertEqual(fixture.label, "changed-in-lua")
+        XCTAssertEqual(fixture.identifier, "fixed")
+    }
+
     @MainActor
     func testLuaUserConfigurationCustomizesCoreEditorObjects() throws {
         let directory = FileManager.default.temporaryDirectory
@@ -35,8 +103,29 @@ final class DevHQTests: XCTestCase {
         local devhq = require "devhq"
         local layout = require "plugins.layout"
         assert(devhq.core.api_version == "0.1")
-        devhq.window.set_theme("dark")
+        devhq.window.theme = "dark"
         layout.apply(devhq)
+        devhq.split.direction = "vertical"
+        devhq.treeview.visible = false
+        devhq.treeview.size = 999
+        assert(devhq.treeview.size == 600)
+        devhq.treeview.size = 333
+        devhq.docview.gutter = false
+        devhq.docview.minimap = false
+        devhq.docview.folding = false
+
+        local changed_theme, theme_error = pcall(function()
+          devhq.window.theme = "invalid"
+        end)
+        assert(not changed_theme)
+        assert(string.find(theme_error, "Invalid theme"))
+        assert(devhq.window.theme == "dark")
+
+        local changed_version, version_error = pcall(function()
+          devhq.core.api_version = "invalid"
+        end)
+        assert(not changed_version)
+        assert(string.find(version_error, "read%-only"))
         """
         try script.write(
             to: directory.appendingPathComponent("init.lua"),
