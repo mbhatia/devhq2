@@ -6,9 +6,14 @@ import SwiftUI
 @main
 struct DevHQApp: App {
     @StateObject private var workspace = WorkspaceModel()
+    @StateObject private var plugins: LuaPluginHost
     private static var snapshotWindow: NSWindow?
 
     init() {
+        let plugins = LuaPluginHost()
+        plugins.loadUserConfiguration()
+        _plugins = StateObject(wrappedValue: plugins)
+
         NSApplication.shared.setActivationPolicy(.regular)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -19,7 +24,7 @@ struct DevHQApp: App {
            CommandLine.arguments.indices.contains(index + 1) {
             let path = CommandLine.arguments[index + 1]
             DispatchQueue.main.async {
-                Self.prepareSnapshotWindow()
+                Self.prepareSnapshotWindow(settings: plugins.settings)
                 if let line = Self.argumentValue(after: "--fold-line").flatMap(Int.init) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                         Self.foldLine(line)
@@ -35,7 +40,7 @@ struct DevHQApp: App {
 
     var body: some Scene {
         WindowGroup("DevHQ") {
-            ContentView(workspace: workspace)
+            ContentView(workspace: workspace, settings: plugins.settings)
                 .frame(minWidth: 900, minHeight: 600)
         }
         .defaultSize(width: 1200, height: 760)
@@ -56,9 +61,9 @@ struct DevHQApp: App {
         }
     }
 
-    private static func prepareSnapshotWindow() {
+    private static func prepareSnapshotWindow(settings: EditorSettings) {
         let model = WorkspaceModel()
-        let content = ContentView(workspace: model)
+        let content = ContentView(workspace: model, settings: settings)
             .frame(width: 1200, height: 760)
         let hostingView = NSHostingView(rootView: content)
         let window = NSWindow(

@@ -22,6 +22,10 @@ let package = Package(
             url: "https://github.com/ChimeHQ/SwiftTreeSitter.git",
             exact: "0.9.0"
         ),
+        .package(
+            url: "https://github.com/tomsci/LuaSwift.git",
+            exact: "1.0.0"
+        ),
         .package(path: "Vendor/CodeEditSymbols")
     ],
     targets: [
@@ -31,7 +35,8 @@ let package = Package(
                 .product(name: "CodeEditLanguages", package: "CodeEditLanguages"),
                 .product(name: "CodeEditSourceEditor", package: "CodeEditSourceEditor"),
                 .product(name: "CodeEditTextView", package: "CodeEditTextView"),
-                .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter")
+                .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter"),
+                .product(name: "Lua", package: "LuaSwift")
             ]
         ),
         .testTarget(

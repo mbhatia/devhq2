@@ -5,6 +5,60 @@ import CodeEditLanguages
 
 final class DevHQTests: XCTestCase {
     @MainActor
+    func testLuaUserConfigurationCustomizesCoreEditorObjects() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let pluginsDirectory = directory.appendingPathComponent("plugins", isDirectory: true)
+        try FileManager.default.createDirectory(at: pluginsDirectory, withIntermediateDirectories: true)
+        let plugin = """
+        local plugin = {}
+        function plugin.apply(devhq)
+          devhq.split.set_direction("vertical")
+          devhq.treeview.set_visible(false)
+          devhq.treeview.set_size(333)
+          devhq.docview.set_gutter(false)
+          devhq.docview.set_minimap(false)
+          devhq.docview.set_folding(false)
+        end
+        return plugin
+        """
+        try plugin.write(
+            to: pluginsDirectory.appendingPathComponent("layout.lua"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let script = """
+        local devhq = require "devhq"
+        local layout = require "plugins.layout"
+        assert(devhq.core.api_version == "0.1")
+        devhq.window.set_theme("dark")
+        layout.apply(devhq)
+        """
+        try script.write(
+            to: directory.appendingPathComponent("init.lua"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let settings = EditorSettings()
+        let host = LuaPluginHost(settings: settings, configDirectory: directory)
+        host.loadUserConfiguration()
+
+        XCTAssertNil(settings.pluginError)
+        XCTAssertEqual(settings.windowTheme, .dark)
+        XCTAssertEqual(settings.splitDirection, .vertical)
+        XCTAssertFalse(settings.treeViewVisible)
+        XCTAssertEqual(settings.treeViewSize, 333)
+        XCTAssertFalse(settings.showGutter)
+        XCTAssertFalse(settings.showMinimap)
+        XCTAssertFalse(settings.showFoldingRibbon)
+    }
+
+    @MainActor
     func testTreeStartsWithOnlyFirstLevelExpandedAndCanToggle() {
         let nestedBranch = TreeNode(id: "nested", value: 2, children: [
             TreeNode(id: "leaf", value: 3, children: nil)

@@ -2,14 +2,31 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var settings: EditorSettings
 
     var body: some View {
-        HSplitView {
-            Sidebar(workspace: workspace)
-                .frame(minWidth: 190, idealWidth: 250, maxWidth: 380)
-            EditorArea(workspace: workspace)
-                .frame(minWidth: 600)
+        Group {
+            if settings.splitDirection == .horizontal {
+                HSplitView {
+                    if settings.treeViewVisible {
+                        Sidebar(workspace: workspace)
+                            .frame(minWidth: 190, idealWidth: settings.treeViewSize, maxWidth: 600)
+                    }
+                    EditorArea(workspace: workspace, settings: settings)
+                        .frame(minWidth: 600)
+                }
+            } else {
+                VSplitView {
+                    if settings.treeViewVisible {
+                        Sidebar(workspace: workspace)
+                            .frame(minHeight: 120, idealHeight: settings.treeViewSize, maxHeight: 600)
+                    }
+                    EditorArea(workspace: workspace, settings: settings)
+                        .frame(minHeight: 400)
+                }
+            }
         }
+        .preferredColorScheme(settings.windowTheme.colorScheme)
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -28,13 +45,18 @@ struct ContentView: View {
         .alert(
             "DevHQ",
             isPresented: Binding(
-                get: { workspace.errorMessage != nil },
-                set: { if !$0 { workspace.errorMessage = nil } }
+                get: { workspace.errorMessage != nil || settings.pluginError != nil },
+                set: {
+                    if !$0 {
+                        workspace.errorMessage = nil
+                        settings.pluginError = nil
+                    }
+                }
             )
         ) {
             Button("OK", role: .cancel) { workspace.errorMessage = nil }
         } message: {
-            Text(workspace.errorMessage ?? "Unknown error")
+            Text(workspace.errorMessage ?? settings.pluginError ?? "Unknown error")
         }
     }
 }
@@ -113,6 +135,7 @@ private struct FileRow: View {
 
 private struct EditorArea: View {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var settings: EditorSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -122,7 +145,7 @@ private struct EditorArea: View {
             }
 
             if let document = workspace.selectedDocument {
-                FileEditor(document: document)
+                FileEditor(document: document, settings: settings)
                     .id(document.id)
             } else {
                 VStack(spacing: 12) {
@@ -192,13 +215,17 @@ private struct TabButton: View {
 
 private struct FileEditor: View {
     @ObservedObject var document: EditorDocument
+    @ObservedObject var settings: EditorSettings
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         SourceEditorView(
             text: Binding(get: { document.text }, set: { document.text = $0 }),
             language: document.language,
-            isDark: colorScheme == .dark
+            isDark: colorScheme == .dark,
+            showGutter: settings.showGutter,
+            showMinimap: settings.showMinimap,
+            showFoldingRibbon: settings.showFoldingRibbon
         )
     }
 }

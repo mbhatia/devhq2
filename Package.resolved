@@ -28,6 +28,15 @@
       }
     },
     {
+      "identity" : "luaswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/tomsci/LuaSwift.git",
+      "state" : {
+        "revision" : "f5b1cf666d02a10b357c2a19c79e6e91247a88f4",
+        "version" : "1.0.0"
+      }
+    },
+    {
       "identity" : "rearrange",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ChimeHQ/Rearrange",

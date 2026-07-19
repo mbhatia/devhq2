@@ -7,6 +7,9 @@ struct SourceEditorView: View {
     @Binding var text: String
     let language: CodeLanguage
     let isDark: Bool
+    let showGutter: Bool
+    let showMinimap: Bool
+    let showFoldingRibbon: Bool
 
     @State private var state = SourceEditorState()
     @State private var syntaxHighlighter = CorrectedTreeSitterHighlightProvider()
@@ -15,13 +18,23 @@ struct SourceEditorView: View {
         SourceEditor(
             $text,
             language: language,
-            configuration: Self.configuration(isDark: isDark),
+            configuration: Self.configuration(
+                isDark: isDark,
+                showGutter: showGutter,
+                showMinimap: showMinimap,
+                showFoldingRibbon: showFoldingRibbon
+            ),
             state: $state,
             highlightProviders: [syntaxHighlighter]
         )
     }
 
-    static func configuration(isDark: Bool) -> SourceEditorConfiguration {
+    static func configuration(
+        isDark: Bool,
+        showGutter: Bool = true,
+        showMinimap: Bool = true,
+        showFoldingRibbon: Bool = true
+    ) -> SourceEditorConfiguration {
         SourceEditorConfiguration(
             appearance: .init(
                 theme: isDark ? .devHQDark : .devHQLight,
@@ -33,9 +46,9 @@ struct SourceEditorView: View {
             behavior: .init(indentOption: .spaces(count: 4)),
             layout: .init(editorOverscroll: 0.15),
             peripherals: .init(
-                showGutter: true,
-                showMinimap: true,
-                showFoldingRibbon: true
+                showGutter: showGutter,
+                showMinimap: showMinimap,
+                showFoldingRibbon: showFoldingRibbon
             )
         )
     }

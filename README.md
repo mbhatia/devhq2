@@ -3,6 +3,31 @@
 A minimal native macOS code editor built with SwiftUI and CodeEditSourceEditor.
 The editor includes syntax highlighting, line numbers, code folding, and a minimap.
 
+## Lua customization
+
+DevHQ embeds Lua 5.4 and loads `~/.config/devhq/init.lua` when it starts. A minimal
+configuration looks like this:
+
+```lua
+local devhq = require "devhq"
+
+devhq.window.set_theme("light") -- "system", "light", or "dark"
+devhq.treeview.set_size(300)
+```
+
+The `devhq` module follows the same broad separation used by Lite XL:
+
+- `core`: API version, configuration directory, and logging
+- `window`: application theme
+- `split`: horizontal or vertical pane direction
+- `treeview`: visibility and pane size
+- `docview`: gutter, minimap, and folding-ribbon visibility
+
+Lua modules below the configuration directory can be loaded normally. For example,
+`require "plugins.statusbar"` loads `~/.config/devhq/plugins/statusbar.lua`. See
+[`Examples/init.lua`](Examples/init.lua) for a complete starter file. Restart DevHQ
+after editing Lua configuration; live plugin reload is not implemented yet.
+
 ## Run
 
 ```sh
