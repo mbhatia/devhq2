@@ -1,32 +1,31 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var worktreeExplorer: WorktreeExplorerModel
     @ObservedObject var settings: EditorSettings
 
     var body: some View {
-        Group {
-            if settings.splitDirection == .horizontal {
-                HSplitView {
-                    if settings.treeViewVisible {
-                        Sidebar(workspace: workspace)
-                            .frame(minWidth: 190, idealWidth: settings.treeViewSize, maxWidth: 600)
-                    }
-                    EditorArea(workspace: workspace, settings: settings)
-                        .frame(minWidth: 600)
-                }
-            } else {
-                VSplitView {
-                    if settings.treeViewVisible {
-                        Sidebar(workspace: workspace)
-                            .frame(minHeight: 120, idealHeight: settings.treeViewSize, maxHeight: 600)
-                    }
-                    EditorArea(workspace: workspace, settings: settings)
-                        .frame(minHeight: 400)
-                }
+        HSplitView {
+            if settings.treeViewVisible {
+                WorktreeExplorerSidebar(explorer: worktreeExplorer, workspace: workspace)
+                    .frame(minWidth: 190, idealWidth: 240, maxWidth: 480)
+
+                Sidebar(workspace: workspace)
+                    .frame(minWidth: 190, idealWidth: settings.treeViewSize, maxWidth: 600)
             }
+
+            EditorArea(workspace: workspace, settings: settings)
+                .frame(minWidth: 500)
         }
         .preferredColorScheme(settings.windowTheme.colorScheme)
+        .onAppear {
+            worktreeExplorer.syncSelection(with: workspace.rootURL)
+        }
+        .onChange(of: workspace.rootURL) { rootURL in
+            worktreeExplorer.syncSelection(with: rootURL)
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -45,18 +44,123 @@ struct ContentView: View {
         .alert(
             "DevHQ",
             isPresented: Binding(
-                get: { workspace.errorMessage != nil || settings.pluginError != nil },
+                get: {
+                    workspace.errorMessage != nil
+                        || worktreeExplorer.errorMessage != nil
+                        || settings.pluginError != nil
+                },
                 set: {
                     if !$0 {
                         workspace.errorMessage = nil
+                        worktreeExplorer.clearError()
                         settings.pluginError = nil
                     }
                 }
             )
         ) {
-            Button("OK", role: .cancel) { workspace.errorMessage = nil }
+            Button("OK", role: .cancel) {
+                workspace.errorMessage = nil
+                worktreeExplorer.clearError()
+                settings.pluginError = nil
+            }
         } message: {
-            Text(workspace.errorMessage ?? settings.pluginError ?? "Unknown error")
+            Text(
+                workspace.errorMessage
+                    ?? worktreeExplorer.errorMessage
+                    ?? settings.pluginError
+                    ?? "Unknown error"
+            )
+        }
+    }
+}
+
+private struct WorktreeExplorerSidebar: View {
+    @ObservedObject var explorer: WorktreeExplorerModel
+    @ObservedObject var workspace: WorkspaceModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "arrow.triangle.branch")
+                    .foregroundStyle(.secondary)
+                Text("Worktree Explorer")
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Button(action: chooseRepository) {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.plain)
+                .help("Add Local Git Repository")
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+
+            Divider()
+
+            if explorer.repositories.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.secondary)
+                    Text("No Repositories").font(.title3.weight(.semibold))
+                    Text("Add a local Git repository to browse its worktrees.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Add Local Git Repository…", action: chooseRepository)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    TreeView(
+                        model: explorer.tree,
+                        selectedID: explorer.selectedNodeID
+                    ) { node in
+                        explorer.activate(node)
+                    } rowContent: { node in
+                        WorktreeExplorerRow(node: node)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                }
+                .background(Color(nsColor: .controlBackgroundColor))
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func chooseRepository() {
+        let panel = NSOpenPanel()
+        panel.title = "Add Local Git Repository"
+        panel.prompt = "Add Repository"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try explorer.addRepository(url)
+            explorer.syncSelection(with: workspace.rootURL)
+        } catch {
+            // The explorer publishes operation errors through errorMessage.
+        }
+    }
+}
+
+private struct WorktreeExplorerRow: View {
+    let node: WorktreeNode
+
+    var body: some View {
+        Label(node.value.name, systemImage: iconName)
+            .lineLimit(1)
+            .help(node.value.url.path)
+            .padding(.vertical, 3)
+    }
+
+    private var iconName: String {
+        switch node.value {
+        case .repository: "externaldrive"
+        case .worktree: "arrow.triangle.branch"
         }
     }
 }

@@ -45,11 +45,17 @@ final class EditorDocument: ObservableObject, Identifiable {
 
 @MainActor
 final class WorkspaceModel: ObservableObject {
+    private struct EditorSession {
+        var documents: [EditorDocument]
+        var selectedDocumentID: UUID?
+    }
+
     @Published private(set) var rootURL: URL?
     let fileTree = TreeModel<String, FileItem>()
     @Published private(set) var documents: [EditorDocument] = []
     @Published var selectedDocumentID: UUID?
     @Published var errorMessage: String?
+    private var editorSessions: [URL: EditorSession] = [:]
 
     var selectedDocument: EditorDocument? {
         documents.first { $0.id == selectedDocumentID }
@@ -75,10 +81,24 @@ final class WorkspaceModel: ObservableObject {
 
     func openWorkspace(_ url: URL) {
         let url = url.standardizedFileURL.resolvingSymlinksInPath()
+
+        if rootURL == url {
+            reloadFileTree(at: url)
+            revealSelectedDocument()
+            return
+        }
+
+        preserveCurrentEditorSession()
         rootURL = url
-        documents = []
-        selectedDocumentID = nil
-        fileTree.replaceRoots(loadChildren(of: url, relativePath: ""))
+        if let session = editorSessions[url] {
+            documents = session.documents
+            selectedDocumentID = session.selectedDocumentID
+        } else {
+            documents = []
+            selectedDocumentID = nil
+        }
+        reloadFileTree(at: url)
+        revealSelectedDocument()
     }
 
     func open(_ node: FileNode) {
@@ -140,6 +160,24 @@ final class WorkspaceModel: ObservableObject {
     private func activate(_ document: EditorDocument) {
         selectedDocumentID = document.id
         if let treeNodeID = document.treeNodeID {
+            fileTree.reveal(treeNodeID)
+        }
+    }
+
+    private func preserveCurrentEditorSession() {
+        guard let rootURL else { return }
+        editorSessions[rootURL] = EditorSession(
+            documents: documents,
+            selectedDocumentID: selectedDocumentID
+        )
+    }
+
+    private func reloadFileTree(at url: URL) {
+        fileTree.replaceRoots(loadChildren(of: url, relativePath: ""))
+    }
+
+    private func revealSelectedDocument() {
+        if let treeNodeID = selectedDocument?.treeNodeID {
             fileTree.reveal(treeNodeID)
         }
     }

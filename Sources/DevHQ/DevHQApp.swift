@@ -5,13 +5,21 @@ import SwiftUI
 
 @main
 struct DevHQApp: App {
-    @StateObject private var workspace = WorkspaceModel()
+    @StateObject private var workspace: WorkspaceModel
+    @StateObject private var worktreeExplorer: WorktreeExplorerModel
     @StateObject private var plugins: LuaPluginHost
     private static var snapshotWindow: NSWindow?
 
     init() {
+        let workspace = WorkspaceModel()
+        let worktreeExplorer = WorktreeExplorerModel(
+            discoverer: LibGit2WorktreeService(),
+            onActivate: { worktree in workspace.openWorkspace(worktree.url) }
+        )
         let plugins = LuaPluginHost()
         plugins.loadUserConfiguration()
+        _workspace = StateObject(wrappedValue: workspace)
+        _worktreeExplorer = StateObject(wrappedValue: worktreeExplorer)
         _plugins = StateObject(wrappedValue: plugins)
 
         NSApplication.shared.setActivationPolicy(.regular)
@@ -40,7 +48,11 @@ struct DevHQApp: App {
 
     var body: some Scene {
         WindowGroup("DevHQ") {
-            ContentView(workspace: workspace, settings: plugins.settings)
+            ContentView(
+                workspace: workspace,
+                worktreeExplorer: worktreeExplorer,
+                settings: plugins.settings
+            )
                 .frame(minWidth: 900, minHeight: 600)
         }
         .defaultSize(width: 1200, height: 760)
@@ -63,7 +75,15 @@ struct DevHQApp: App {
 
     private static func prepareSnapshotWindow(settings: EditorSettings) {
         let model = WorkspaceModel()
-        let content = ContentView(workspace: model, settings: settings)
+        let worktreeExplorer = WorktreeExplorerModel(
+            discoverer: LibGit2WorktreeService(),
+            onActivate: { worktree in model.openWorkspace(worktree.url) }
+        )
+        let content = ContentView(
+            workspace: model,
+            worktreeExplorer: worktreeExplorer,
+            settings: settings
+        )
             .frame(width: 1200, height: 760)
         let hostingView = NSHostingView(rootView: content)
         let window = NSWindow(
