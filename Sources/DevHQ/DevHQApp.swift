@@ -78,6 +78,7 @@ struct DevHQApp: App {
         _layout = StateObject(wrappedValue: layout)
         applicationDelegate.terminationHandler = {
             workspace.saveCurrentWorkspaceState()
+            workspace.closeAllTerminals()
         }
 
         NSApplication.shared.setActivationPolicy(.regular)
@@ -133,6 +134,22 @@ struct DevHQApp: App {
                 .disabled(workspace.selectedDocument == nil)
             }
             CommandGroup(after: .saveItem) {
+                Button("New Terminal") {
+                    do {
+                        _ = try workspace.newTerminal()
+                    } catch {
+                        workspace.errorMessage = error.localizedDescription
+                    }
+                }
+                .keyboardShortcut("`", modifiers: [.control, .shift])
+                .disabled(workspace.rootURL == nil)
+
+                Button("Close Terminal") {
+                    if let terminal = workspace.selectedTerminal { workspace.close(terminal) }
+                }
+                .keyboardShortcut("w", modifiers: [.command])
+                .disabled(workspace.selectedTerminal == nil)
+
                 Button("Command Palette…") {
                     commandPalette.present(
                         in: commandContext.snapshot(workspace: workspace)

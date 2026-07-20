@@ -2,6 +2,14 @@
 
 import PackageDescription
 import CompilerPluginSupport
+import Foundation
+
+let ghosttyFrameworkPath = "ghostty-vt.xcframework"
+let hasGhosttyFramework = FileManager.default.fileExists(atPath: ghosttyFrameworkPath)
+var terminalBridgeDependencies: [Target.Dependency] = []
+if hasGhosttyFramework {
+    terminalBridgeDependencies.append("GhosttyVt")
+}
 
 let package = Package(
     name: "DevHQ",
@@ -55,6 +63,15 @@ let package = Package(
             dependencies: ["libgit2", "libssh2", "libssl", "libcrypto"],
             path: "Sources/DevHQ/CLibgit2"
         ),
+        .target(
+            name: "TerminalBridge",
+            dependencies: terminalBridgeDependencies,
+            path: "Sources/TerminalBridge",
+            cSettings: hasGhosttyFramework
+                ? [.define("DEVHQ_USE_GHOSTTY"), .define("GHOSTTY_STATIC")]
+                : [],
+            linkerSettings: [.linkedLibrary("util")]
+        ),
         .executableTarget(
             name: "DevHQ",
             dependencies: [
@@ -64,10 +81,12 @@ let package = Package(
                 .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter"),
                 .product(name: "Lua", package: "LuaSwift"),
                 "CLibgit2",
-                "DevHQLua"
+                "DevHQLua",
+                "TerminalBridge"
             ],
             path: "Sources/DevHQ",
-            exclude: ["CLibgit2"]
+            exclude: ["CLibgit2"],
+            resources: [.copy("Resources")]
         ),
         .testTarget(
             name: "DevHQTests",
@@ -93,5 +112,7 @@ let package = Package(
             url: "https://raw.githubusercontent.com/swift-developer-tools/swift-libgit2/1.0.1/swift-libgit2-base/lib/libcrypto.zip",
             checksum: "c3bc28f0a252b60189e931540e1efaad7e3479e69b3fa9acf1d134835f9a1fb7"
         )
-    ]
+    ] + (hasGhosttyFramework ? [
+        .binaryTarget(name: "GhosttyVt", path: ghosttyFrameworkPath)
+    ] : [])
 )

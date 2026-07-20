@@ -16,12 +16,15 @@ final class BuiltInCommandsTests: XCTestCase {
         )
 
         XCTAssertEqual(Set(manager.commandsByID.keys), [
-            "worktree:add-repo", "file:new", "file:new-dir", "file:close"
+            "worktree:add-repo", "file:new", "file:new-dir", "file:close",
+            "terminal:new", "terminal:close"
         ])
         XCTAssertEqual(manager.commandsByID["worktree:add-repo"]?.title, "worktree: add repo")
         XCTAssertEqual(manager.commandsByID["file:new"]?.title, "file: new")
         XCTAssertEqual(manager.commandsByID["file:new-dir"]?.title, "file: new dir")
         XCTAssertEqual(manager.commandsByID["file:close"]?.title, "file: close")
+        XCTAssertEqual(manager.commandsByID["terminal:new"]?.title, "terminal: new")
+        XCTAssertEqual(manager.commandsByID["terminal:close"]?.title, "terminal: close")
         XCTAssertEqual(
             manager.commandsByID["worktree:add-repo"]?.viewKinds,
             Set(CommandViewKind.allCases)
@@ -29,6 +32,8 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(manager.commandsByID["file:new"]?.viewKinds, [.file, .document])
         XCTAssertEqual(manager.commandsByID["file:new-dir"]?.viewKinds, [.file, .document])
         XCTAssertEqual(manager.commandsByID["file:close"]?.viewKinds, [.document])
+        XCTAssertEqual(manager.commandsByID["terminal:new"]?.viewKinds, Set(CommandViewKind.allCases))
+        XCTAssertEqual(manager.commandsByID["terminal:close"]?.viewKinds, [.terminal])
 
         for view in CommandViewKind.allCases {
             XCTAssertEqual(
@@ -42,11 +47,11 @@ final class BuiltInCommandsTests: XCTestCase {
         workspace.openWorkspace(root)
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .file)).map(\.id),
-            ["file:new", "file:new-dir", "worktree:add-repo"]
+            ["file:new", "file:new-dir", "terminal:new", "worktree:add-repo"]
         )
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .document)).map(\.id),
-            ["file:new", "file:new-dir", "worktree:add-repo"]
+            ["file:new", "file:new-dir", "terminal:new", "worktree:add-repo"]
         )
 
         let existingFile = root.appendingPathComponent("Open.swift")
@@ -54,7 +59,7 @@ final class BuiltInCommandsTests: XCTestCase {
         workspace.openFile(existingFile)
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .document)).map(\.id),
-            ["file:close", "file:new", "file:new-dir", "worktree:add-repo"]
+            ["file:close", "file:new", "file:new-dir", "terminal:new", "worktree:add-repo"]
         )
     }
 

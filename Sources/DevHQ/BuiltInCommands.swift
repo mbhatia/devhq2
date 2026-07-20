@@ -62,6 +62,23 @@ func registerBuiltInCommands(
     }
 
     try commandManager.add(
+        id: "terminal:new",
+        viewKinds: Set(CommandViewKind.allCases),
+        predicate: workspaceAvailable
+    ) { _ in
+        _ = try workspace.newTerminal()
+    }
+
+    try commandManager.add(
+        id: "terminal:close",
+        viewKinds: [.terminal],
+        predicate: { _ in workspace.selectedTerminal != nil }
+    ) { _ in
+        guard let terminal = workspace.selectedTerminal else { return }
+        workspace.close(terminal)
+    }
+
+    try commandManager.add(
         id: "file:new",
         viewKinds: [.file, .document],
         predicate: workspaceAvailable

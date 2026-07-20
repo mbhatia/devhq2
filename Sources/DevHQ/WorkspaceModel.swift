@@ -68,11 +68,37 @@ final class EditorDocument: ObservableObject, Identifiable {
     }
 }
 
+enum EditorTab: Identifiable {
+    case document(EditorDocument)
+    case terminal(TerminalSession)
+
+    var id: UUID {
+        switch self {
+        case .document(let document): document.id
+        case .terminal(let terminal): terminal.id
+        }
+    }
+
+    var document: EditorDocument? {
+        guard case .document(let document) = self else { return nil }
+        return document
+    }
+
+    var terminal: TerminalSession? {
+        guard case .terminal(let terminal) = self else { return nil }
+        return terminal
+    }
+}
+
 @MainActor
 final class WorkspaceModel: ObservableObject {
     private struct EditorSession {
         var documents: [EditorDocument]
+        var tabs: [EditorTab]
         var selectedDocumentID: UUID?
+        var selectedTabID: UUID?
+        var lastSelectedDocumentID: UUID?
+        var expandedFileNodeIDs: Set<String>
     }
 
     private struct PersistentWorkspaceIdentity: Equatable {
@@ -85,14 +111,23 @@ final class WorkspaceModel: ObservableObject {
     let fileTree = TreeModel<String, FileItem>()
     @Published private(set) var documents: [EditorDocument] = []
     @Published var selectedDocumentID: UUID?
+    @Published private(set) var tabs: [EditorTab] = []
+    @Published private(set) var selectedTabID: UUID?
     @Published var errorMessage: String?
     private var editorSessions: [URL: EditorSession] = [:]
     private let stateStore: WorkspaceStatePersisting?
     private var persistentWorkspaceIdentity: PersistentWorkspaceIdentity?
+    private var lastSelectedDocumentID: UUID?
 
     var selectedDocument: EditorDocument? {
         documents.first { $0.id == selectedDocumentID }
     }
+
+    var selectedTerminal: TerminalSession? {
+        tabs.first { $0.id == selectedTabID }?.terminal
+    }
+
+    var terminalSessions: [TerminalSession] { tabs.compactMap(\.terminal) }
 
     var selectedFileNodeID: String? { selectedDocument?.treeNodeID }
 
@@ -148,16 +183,28 @@ final class WorkspaceModel: ObservableObject {
 
         if persistentWorkspaceIdentity != nil {
             saveCurrentWorkspaceState()
-        } else {
-            preserveCurrentEditorSession()
         }
+        preserveCurrentEditorSession()
 
         persistentWorkspaceIdentity = destination
         rootURL = url
         documents = []
         selectedDocumentID = nil
+        tabs = []
+        selectedTabID = nil
+        lastSelectedDocumentID = nil
         reloadFileTree(at: url)
-        restoreWorkspaceState(for: destination)
+        if let session = editorSessions[url] {
+            documents = session.documents
+            tabs = session.tabs
+            selectedDocumentID = session.selectedDocumentID
+            selectedTabID = session.selectedTabID
+            lastSelectedDocumentID = session.lastSelectedDocumentID
+            fileTree.restoreExpandedIDs(session.expandedFileNodeIDs)
+            updateTerminalActivity()
+        } else {
+            restoreWorkspaceState(for: destination)
+        }
     }
 
     /// Reconciles a branch rename or checkout discovered for the active
@@ -203,7 +250,9 @@ final class WorkspaceModel: ObservableObject {
             )
         }
         let persistedDocumentPaths = Set(persistedDocuments.map(\.0))
-        let selectedTabPath = selectedDocument
+        let persistenceDocument = selectedDocument
+            ?? documents.first { $0.id == lastSelectedDocumentID }
+        let selectedTabPath = persistenceDocument
             .flatMap { relativePath(for: $0.url, in: identity.rootURL) }
             .flatMap { persistedDocumentPaths.contains($0) ? $0 : nil }
         let state = PersistedWorkspaceState(
@@ -234,14 +283,25 @@ final class WorkspaceModel: ObservableObject {
 
         preserveCurrentEditorSession()
         rootURL = url
+        var restoredExpandedFileNodeIDs: Set<String>?
         if let session = editorSessions[url] {
             documents = session.documents
             selectedDocumentID = session.selectedDocumentID
+            tabs = session.tabs
+            selectedTabID = session.selectedTabID
+            lastSelectedDocumentID = session.lastSelectedDocumentID
+            restoredExpandedFileNodeIDs = session.expandedFileNodeIDs
         } else {
             documents = []
             selectedDocumentID = nil
+            tabs = []
+            selectedTabID = nil
+            lastSelectedDocumentID = nil
         }
         reloadFileTree(at: url)
+        if let restoredExpandedFileNodeIDs {
+            fileTree.restoreExpandedIDs(restoredExpandedFileNodeIDs)
+        }
         revealSelectedDocument()
     }
 
@@ -266,6 +326,7 @@ final class WorkspaceModel: ObservableObject {
             let text = try String(contentsOf: url, encoding: .utf8)
             let document = EditorDocument(url: url, text: text, treeNodeID: treeNodeID)
             documents.append(document)
+            tabs.append(.document(document))
             activate(document)
         } catch {
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
@@ -276,26 +337,43 @@ final class WorkspaceModel: ObservableObject {
         activate(document)
     }
 
+    func select(_ terminal: TerminalSession) {
+        activateTab(id: terminal.id)
+    }
+
+    @discardableResult
+    func newTerminal(shell: String? = nil) throws -> TerminalSession {
+        guard let rootURL else { throw WorkspaceCommandOperationError.noWorkspace }
+        let terminal = try TerminalSession(rootURL: rootURL, shell: shell)
+        tabs.append(.terminal(terminal))
+        activateTab(id: terminal.id)
+        errorMessage = nil
+        return terminal
+    }
+
     func close(_ document: EditorDocument) {
         guard let index = documents.firstIndex(where: { $0.id == document.id }) else { return }
         documents.remove(at: index)
+        let tabIndex = tabs.firstIndex { $0.id == document.id }
+        tabs.removeAll { $0.id == document.id }
+        if lastSelectedDocumentID == document.id { lastSelectedDocumentID = documents.last?.id }
         if selectedDocumentID == document.id {
-            selectedDocumentID = documents.indices.contains(index)
-                ? documents[index].id
-                : documents.last?.id
-            if let selectedDocument {
-                if let treeNodeID = selectedDocument.treeNodeID {
-                    fileTree.reveal(treeNodeID)
-                }
-            }
+            selectAdjacentTab(afterRemoving: tabIndex)
         }
+    }
+
+    func close(_ terminal: TerminalSession) {
+        guard let index = tabs.firstIndex(where: { $0.id == terminal.id }) else { return }
+        terminal.close()
+        tabs.remove(at: index)
+        if selectedTabID == terminal.id { selectAdjacentTab(afterRemoving: index) }
     }
 
     /// Closes the active tab. Unsaved text is discarded, matching the existing
     /// tab close button behavior.
     func closeSelected() {
-        guard let selectedDocument else { return }
-        close(selectedDocument)
+        if let selectedTerminal { close(selectedTerminal) }
+        else if let selectedDocument { close(selectedDocument) }
     }
 
     @discardableResult
@@ -343,6 +421,9 @@ final class WorkspaceModel: ObservableObject {
 
     private func activate(_ document: EditorDocument) {
         selectedDocumentID = document.id
+        selectedTabID = document.id
+        lastSelectedDocumentID = document.id
+        updateTerminalActivity()
         if let treeNodeID = document.treeNodeID {
             fileTree.reveal(treeNodeID)
         }
@@ -352,7 +433,11 @@ final class WorkspaceModel: ObservableObject {
         guard let rootURL else { return }
         editorSessions[rootURL] = EditorSession(
             documents: documents,
-            selectedDocumentID: selectedDocumentID
+            tabs: tabs,
+            selectedDocumentID: selectedDocumentID,
+            selectedTabID: selectedTabID,
+            lastSelectedDocumentID: lastSelectedDocumentID,
+            expandedFileNodeIDs: fileTree.expandedIDs
         )
     }
 
@@ -406,6 +491,9 @@ final class WorkspaceModel: ObservableObject {
         selectedDocumentID = state.selectedTabPath.flatMap { selectedPath in
             restoredDocuments.first { $0.path == selectedPath }?.document.id
         }
+        tabs = documents.map(EditorTab.document)
+        selectedTabID = selectedDocumentID
+        lastSelectedDocumentID = selectedDocumentID
     }
 
     private func reloadFileTree(at url: URL) {
@@ -515,5 +603,57 @@ final class WorkspaceModel: ObservableObject {
         for path in arguments.dropFirst(openIndex + 1).prefix(while: { !$0.hasPrefix("--") }) {
             openFile(root.appendingPathComponent(path))
         }
+    }
+
+    func closeAllTerminals() {
+        let activeTerminalID = selectedTerminal?.id
+        for terminal in allTerminalSessions { terminal.close() }
+        tabs.removeAll { $0.terminal != nil }
+        for key in editorSessions.keys {
+            guard var session = editorSessions[key] else { continue }
+            let selectedWasTerminal = session.tabs.first {
+                $0.id == session.selectedTabID
+            }?.terminal != nil
+            session.tabs.removeAll { $0.terminal != nil }
+            if selectedWasTerminal {
+                session.selectedTabID = session.lastSelectedDocumentID
+                session.selectedDocumentID = session.lastSelectedDocumentID
+            }
+            editorSessions[key] = session
+        }
+        if activeTerminalID != nil { selectAdjacentTab(afterRemoving: nil) }
+    }
+
+    private var allTerminalSessions: [TerminalSession] {
+        var seen = Set<UUID>()
+        return (terminalSessions + editorSessions.values.flatMap { $0.tabs.compactMap(\.terminal) })
+            .filter { seen.insert($0.id).inserted }
+    }
+
+    private func activateTab(id: UUID) {
+        selectedTabID = id
+        if let document = tabs.first(where: { $0.id == id })?.document {
+            selectedDocumentID = document.id
+            lastSelectedDocumentID = document.id
+            if let treeNodeID = document.treeNodeID { fileTree.reveal(treeNodeID) }
+        } else {
+            selectedDocumentID = nil
+        }
+        updateTerminalActivity()
+    }
+
+    private func selectAdjacentTab(afterRemoving removedIndex: Int?) {
+        guard !tabs.isEmpty else {
+            selectedTabID = nil
+            selectedDocumentID = nil
+            updateTerminalActivity()
+            return
+        }
+        let index = min(removedIndex ?? (tabs.count - 1), tabs.count - 1)
+        activateTab(id: tabs[index].id)
+    }
+
+    private func updateTerminalActivity() {
+        for terminal in allTerminalSessions { terminal.setActive(terminal.id == selectedTabID) }
     }
 }

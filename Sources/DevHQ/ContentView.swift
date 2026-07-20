@@ -19,7 +19,8 @@ final class CommandContextTracker: ObservableObject {
             view: activeView,
             worktreeURL: workspace.rootURL,
             fileURL: selectedURL,
-            documentURL: selectedURL
+            documentURL: selectedURL,
+            terminalID: workspace.selectedTerminal?.id
         )
     }
 }
@@ -104,7 +105,9 @@ struct ContentView: View {
                     .frame(minWidth: 500, maxWidth: .infinity)
                     .background {
                         PaneActivationMonitor(isEnabled: !commandPalette.isPresented) {
-                            commandContext.activate(.document)
+                            commandContext.activate(
+                                workspace.selectedTerminal == nil ? .document : .terminal
+                            )
                         }
                     }
             }
@@ -120,10 +123,8 @@ struct ContentView: View {
             worktreeExplorer.syncSelection(with: rootURL)
             commandContext.activate(initialCommandView)
         }
-        .onChange(of: workspace.selectedDocumentID) { selectedDocumentID in
-            if selectedDocumentID != nil {
-                commandContext.activate(.document)
-            }
+        .onChange(of: workspace.selectedTabID) { _ in
+            commandContext.activate(workspace.selectedTerminal == nil ? .document : .terminal)
         }
         .onChange(of: settings.treeViewSize) { width in
             guard tracksLayoutChanges,
@@ -188,6 +189,7 @@ struct ContentView: View {
     }
 
     private var initialCommandView: CommandViewKind {
+        if workspace.selectedTerminal != nil { return .terminal }
         if workspace.selectedDocument != nil { return .document }
         if workspace.rootURL != nil { return .file }
         return .worktree
@@ -458,26 +460,36 @@ private struct EditorArea: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !workspace.documents.isEmpty {
+            if !workspace.tabs.isEmpty {
                 TabStrip(workspace: workspace)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .zIndex(1)
                 Divider()
+                    .zIndex(1)
             }
 
-            if let document = workspace.selectedDocument {
-                FileEditor(document: document, settings: settings)
-                    .id(document.id)
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "doc.text")
-                        .font(.system(size: 42))
-                        .foregroundStyle(.secondary)
-                    Text("No File Open").font(.title2.weight(.semibold))
-                    Text("Select a file from the project navigator.")
-                        .foregroundStyle(.secondary)
+            Group {
+                if let document = workspace.selectedDocument {
+                    FileEditor(document: document, settings: settings)
+                        .id(document.id)
+                } else if let terminal = workspace.selectedTerminal {
+                    TerminalView(session: terminal)
+                        .id(terminal.id)
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 42))
+                            .foregroundStyle(.secondary)
+                        Text("No Tab Open").font(.title2.weight(.semibold))
+                        Text("Select a file or open a terminal.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
         }
+        .clipped()
     }
 }
 
@@ -487,19 +499,58 @@ private struct TabStrip: View {
     var body: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 0) {
-                ForEach(workspace.documents) { document in
-                    TabButton(
-                        document: document,
-                        isSelected: workspace.selectedDocumentID == document.id,
-                        select: { workspace.select(document) },
-                        close: { workspace.close(document) }
-                    )
+                ForEach(workspace.tabs) { tab in
+                    switch tab {
+                    case .document(let document):
+                        TabButton(
+                            document: document,
+                            isSelected: workspace.selectedTabID == document.id,
+                            select: { workspace.select(document) },
+                            close: { workspace.close(document) }
+                        )
+                    case .terminal(let terminal):
+                        TerminalTabButton(
+                            terminal: terminal,
+                            isSelected: workspace.selectedTabID == terminal.id,
+                            select: { workspace.select(terminal) },
+                            close: { workspace.close(terminal) }
+                        )
+                    }
                 }
             }
         }
         .scrollIndicators(.hidden)
         .frame(height: 38)
         .background(.bar)
+    }
+}
+
+private struct TerminalTabButton: View {
+    @ObservedObject var terminal: TerminalSession
+    let isSelected: Bool
+    let select: () -> Void
+    let close: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "terminal")
+                .foregroundStyle(.secondary)
+            Text(terminal.displayTitle)
+                .lineLimit(1)
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 38)
+        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        .overlay(alignment: .bottom) {
+            if isSelected { Color.accentColor.frame(height: 2) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: select)
     }
 }
 

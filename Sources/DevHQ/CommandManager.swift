@@ -4,6 +4,7 @@ enum CommandViewKind: String, CaseIterable, Hashable {
     case worktree
     case file
     case document
+    case terminal
 }
 
 struct CommandContext: Equatable {
@@ -11,17 +12,20 @@ struct CommandContext: Equatable {
     let worktreeURL: URL?
     let fileURL: URL?
     let documentURL: URL?
+    let terminalID: UUID?
 
     init(
         view: CommandViewKind,
         worktreeURL: URL? = nil,
         fileURL: URL? = nil,
-        documentURL: URL? = nil
+        documentURL: URL? = nil,
+        terminalID: UUID? = nil
     ) {
         self.view = view
         self.worktreeURL = worktreeURL
         self.fileURL = fileURL
         self.documentURL = documentURL
+        self.terminalID = terminalID
     }
 }
 
