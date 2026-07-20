@@ -19,9 +19,15 @@ struct DevHQApp: App {
     @StateObject private var workspace: WorkspaceModel
     @StateObject private var worktreeExplorer: WorktreeExplorerModel
     @StateObject private var plugins: LuaPluginHost
+    @StateObject private var layout: WorkspaceLayoutModel
     private static var snapshotWindow: NSWindow?
 
     init() {
+        let plugins = LuaPluginHost()
+        plugins.loadUserConfiguration()
+        let layout = WorkspaceLayoutModel(
+            fileExplorerFallbackWidth: plugins.settings.treeViewSize
+        )
         let stateStore = WorkspaceStateStore()
         let workspace = WorkspaceModel(stateStore: stateStore)
         let worktreeExplorer = WorktreeExplorerModel(
@@ -47,11 +53,10 @@ struct DevHQApp: App {
         if hasExplicitCommandLineWorkspace {
             worktreeExplorer.syncSelection(with: workspace.rootURL)
         }
-        let plugins = LuaPluginHost()
-        plugins.loadUserConfiguration()
         _workspace = StateObject(wrappedValue: workspace)
         _worktreeExplorer = StateObject(wrappedValue: worktreeExplorer)
         _plugins = StateObject(wrappedValue: plugins)
+        _layout = StateObject(wrappedValue: layout)
         applicationDelegate.terminationHandler = {
             workspace.saveCurrentWorkspaceState()
         }
@@ -66,7 +71,7 @@ struct DevHQApp: App {
            CommandLine.arguments.indices.contains(index + 1) {
             let path = CommandLine.arguments[index + 1]
             DispatchQueue.main.async {
-                Self.prepareSnapshotWindow(settings: plugins.settings)
+                Self.prepareSnapshotWindow(settings: plugins.settings, layout: layout)
                 if let line = Self.argumentValue(after: "--fold-line").flatMap(Int.init) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                         Self.foldLine(line)
@@ -85,7 +90,8 @@ struct DevHQApp: App {
             ContentView(
                 workspace: workspace,
                 worktreeExplorer: worktreeExplorer,
-                settings: plugins.settings
+                settings: plugins.settings,
+                layout: layout
             )
                 .frame(minWidth: 900, minHeight: 600)
         }
@@ -107,7 +113,10 @@ struct DevHQApp: App {
         }
     }
 
-    private static func prepareSnapshotWindow(settings: EditorSettings) {
+    private static func prepareSnapshotWindow(
+        settings: EditorSettings,
+        layout: WorkspaceLayoutModel
+    ) {
         let model = WorkspaceModel()
         let worktreeExplorer = WorktreeExplorerModel(
             discoverer: LibGit2WorktreeService(),
@@ -116,7 +125,9 @@ struct DevHQApp: App {
         let content = ContentView(
             workspace: model,
             worktreeExplorer: worktreeExplorer,
-            settings: settings
+            settings: settings,
+            layout: layout,
+            tracksLayoutChanges: false
         )
             .frame(width: 1200, height: 760)
         let hostingView = NSHostingView(rootView: content)

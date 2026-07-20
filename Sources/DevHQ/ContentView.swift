@@ -5,19 +5,62 @@ struct ContentView: View {
     @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var worktreeExplorer: WorktreeExplorerModel
     @ObservedObject var settings: EditorSettings
+    @ObservedObject var layout: WorkspaceLayoutModel
+    var tracksLayoutChanges = true
+    @State private var hasRestoredLayout = false
+    @State private var layoutRestorationRequestID = 0
 
     var body: some View {
         HSplitView {
             if settings.treeViewVisible {
                 WorktreeExplorerSidebar(explorer: worktreeExplorer, workspace: workspace)
-                    .frame(minWidth: 190, idealWidth: 240, maxWidth: 480)
+                    .frame(
+                        minWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.lowerBound,
+                        idealWidth: layout.worktreeExplorerWidth,
+                        maxWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.upperBound
+                    )
+                    .background {
+                        ZStack {
+                            WorkspaceSplitViewRestorer(
+                                worktreeExplorerWidth: layout.worktreeExplorerWidth,
+                                fileExplorerWidth: layout.fileExplorerWidth,
+                                requestID: layoutRestorationRequestID
+                            ) {
+                                if tracksLayoutChanges,
+                                   abs(settings.treeViewSize - layout.fileExplorerWidth)
+                                    >= WorkspaceLayoutModel.widthUpdateTolerance {
+                                    settings.treeViewSize = layout.fileExplorerWidth
+                                }
+                                hasRestoredLayout = true
+                            }
+
+                            PaneWidthObserver { width in
+                                guard tracksLayoutChanges, hasRestoredLayout else { return }
+                                layout.updateWorktreeExplorerWidth(width)
+                            }
+                        }
+                    }
 
                 Sidebar(workspace: workspace)
-                    .frame(minWidth: 190, idealWidth: settings.treeViewSize, maxWidth: 600)
+                    .frame(
+                        minWidth: WorkspaceLayoutState.fileExplorerWidthRange.lowerBound,
+                        idealWidth: layout.fileExplorerWidth,
+                        maxWidth: WorkspaceLayoutState.fileExplorerWidthRange.upperBound
+                    )
+                    .background {
+                        PaneWidthObserver { width in
+                            guard tracksLayoutChanges, hasRestoredLayout else { return }
+                            layout.updateFileExplorerWidth(width)
+                            if abs(settings.treeViewSize - layout.fileExplorerWidth)
+                                >= WorkspaceLayoutModel.widthUpdateTolerance {
+                                settings.treeViewSize = layout.fileExplorerWidth
+                            }
+                        }
+                    }
             }
 
             EditorArea(workspace: workspace, settings: settings)
-                .frame(minWidth: 500)
+                .frame(minWidth: 500, maxWidth: .infinity)
         }
         .preferredColorScheme(settings.windowTheme.colorScheme)
         .onAppear {
@@ -25,6 +68,17 @@ struct ContentView: View {
         }
         .onChange(of: workspace.rootURL) { rootURL in
             worktreeExplorer.syncSelection(with: rootURL)
+        }
+        .onChange(of: settings.treeViewSize) { width in
+            guard tracksLayoutChanges,
+                  !settings.treeViewVisible || hasRestoredLayout else { return }
+            layout.updateFileExplorerWidth(width)
+        }
+        .onChange(of: settings.treeViewVisible) { isVisible in
+            hasRestoredLayout = false
+            if isVisible {
+                layoutRestorationRequestID += 1
+            }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -48,12 +102,14 @@ struct ContentView: View {
                     workspace.errorMessage != nil
                         || worktreeExplorer.errorMessage != nil
                         || settings.pluginError != nil
+                        || layout.errorMessage != nil
                 },
                 set: {
                     if !$0 {
                         workspace.errorMessage = nil
                         worktreeExplorer.clearError()
                         settings.pluginError = nil
+                        layout.clearError()
                     }
                 }
             )
@@ -62,14 +118,32 @@ struct ContentView: View {
                 workspace.errorMessage = nil
                 worktreeExplorer.clearError()
                 settings.pluginError = nil
+                layout.clearError()
             }
         } message: {
             Text(
                 workspace.errorMessage
                     ?? worktreeExplorer.errorMessage
                     ?? settings.pluginError
+                    ?? layout.errorMessage
                     ?? "Unknown error"
             )
+        }
+    }
+}
+
+private struct PaneWidthObserver: View {
+    let onChange: (Double) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            Color.clear
+                .onAppear {
+                    onChange(geometry.size.width)
+                }
+                .onChange(of: geometry.size.width) { width in
+                    onChange(width)
+                }
         }
     }
 }
