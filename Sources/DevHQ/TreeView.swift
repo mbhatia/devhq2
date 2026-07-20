@@ -3,8 +3,23 @@ import SwiftUI
 struct TreeView<ID: Hashable, Value, RowContent: View>: View {
     @ObservedObject var model: TreeModel<ID, Value>
     let selectedID: ID?
+    let onToggle: ((TreeNode<ID, Value>) -> Void)?
     let onSelect: (TreeNode<ID, Value>) -> Void
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
+
+    init(
+        model: TreeModel<ID, Value>,
+        selectedID: ID?,
+        onToggle: ((TreeNode<ID, Value>) -> Void)? = nil,
+        onSelect: @escaping (TreeNode<ID, Value>) -> Void,
+        @ViewBuilder rowContent: @escaping (TreeNode<ID, Value>) -> RowContent
+    ) {
+        self.model = model
+        self.selectedID = selectedID
+        self.onToggle = onToggle
+        self.onSelect = onSelect
+        self.rowContent = rowContent
+    }
 
     var body: some View {
         TreeRows(
@@ -12,6 +27,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
             model: model,
             selectedID: selectedID,
             level: 0,
+            onToggle: onToggle,
             onSelect: onSelect,
             rowContent: rowContent
         )
@@ -23,6 +39,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
     @ObservedObject var model: TreeModel<ID, Value>
     let selectedID: ID?
     let level: Int
+    let onToggle: ((TreeNode<ID, Value>) -> Void)?
     let onSelect: (TreeNode<ID, Value>) -> Void
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
 
@@ -31,7 +48,11 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
             VStack(alignment: .leading, spacing: 1) {
                 Button {
                     if node.isBranch {
-                        model.toggle(node)
+                        if let onToggle {
+                            onToggle(node)
+                        } else {
+                            model.toggle(node)
+                        }
                     } else {
                         onSelect(node)
                     }
@@ -63,6 +84,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                         model: model,
                         selectedID: selectedID,
                         level: level + 1,
+                        onToggle: onToggle,
                         onSelect: onSelect,
                         rowContent: rowContent
                     )

@@ -115,7 +115,8 @@ private struct WorktreeExplorerSidebar: View {
                 ScrollView {
                     TreeView(
                         model: explorer.tree,
-                        selectedID: explorer.selectedNodeID
+                        selectedID: explorer.selectedNodeID,
+                        onToggle: { node in explorer.toggle(node) }
                     ) { node in
                         explorer.activate(node)
                     } rowContent: { node in

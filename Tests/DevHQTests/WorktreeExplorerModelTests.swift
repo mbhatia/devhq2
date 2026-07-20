@@ -51,7 +51,401 @@ private final class FakeRepositoryWatcherFactory {
     }
 }
 
+private final class FakeWorkspaceStateStore: WorkspaceStatePersisting {
+    var loadedRepositories: [PersistedRepositoryState] = []
+    private(set) var repositoryWrites: [[PersistedRepositoryState]] = []
+
+    func loadRepositories() throws -> [PersistedRepositoryState] {
+        loadedRepositories
+    }
+
+    func saveRepositories(_ repositories: [PersistedRepositoryState]) throws {
+        repositoryWrites.append(repositories)
+    }
+
+    func loadWorkspaceState(
+        canonicalRepositoryName: String,
+        worktreeName: String
+    ) throws -> PersistedWorkspaceState? {
+        nil
+    }
+
+    func saveWorkspaceState(
+        _ state: PersistedWorkspaceState,
+        canonicalRepositoryName: String,
+        worktreeName: String
+    ) throws {}
+}
+
 final class WorktreeExplorerModelTests: XCTestCase {
+    @MainActor
+    func testAllocatesStableCanonicalNamesForSameNamedRepositories() throws {
+        let first = repository(at: "/repos/one/DevHQ", worktrees: [])
+        let second = repository(at: "/repos/two/devhq", worktrees: [])
+        let third = repository(at: "/repos/three/DEVHQ", worktrees: [])
+        let discoverer = FakeWorktreeDiscoverer([first, second, third])
+        let watcherFactory = FakeRepositoryWatcherFactory()
+        let model = WorktreeExplorerModel(
+            discoverer: discoverer,
+            onActivate: { _ in },
+            watcherFactory: watcherFactory.make,
+            eventDelivery: { $0() }
+        )
+
+        try model.addRepository(first.rootURL)
+        try model.addRepository(second.rootURL)
+        try model.addRepository(third.rootURL)
+        XCTAssertEqual(model.repositories.map(\.canonicalName), [
+            "DevHQ", "devhq-2", "DEVHQ-3"
+        ])
+
+        discoverer.repositoriesByPath[second.rootURL.standardizedFileURL.path] = repository(
+            at: "/repos/two/devhq",
+            worktrees: [worktree("updated", at: "/worktrees/updated")]
+        )
+        model.refreshRepository(id: second.id)
+        XCTAssertEqual(model.repositories[1].canonicalName, "devhq-2")
+        XCTAssertEqual(model.tree.roots[1].value.name, "devhq-2")
+    }
+
+    @MainActor
+    func testRefreshReportsSelectedBranchIdentityChangeWithoutReactivation() throws {
+        let original = worktree("feature/old", at: "/worktrees/feature")
+        let initial = repository(
+            at: "/repos/project",
+            worktrees: [original]
+        )
+        let discoverer = FakeWorktreeDiscoverer([initial])
+        let watcherFactory = FakeRepositoryWatcherFactory()
+        var activationCount = 0
+        var identityChanges: [(GitRepositoryInfo, GitWorktreeInfo)] = []
+        let model = WorktreeExplorerModel(
+            discoverer: discoverer,
+            onActivate: { _, _ in activationCount += 1 },
+            onSelectionIdentityChange: { identityChanges.append(($0, $1)) },
+            watcherFactory: watcherFactory.make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(initial.rootURL)
+        model.activate(try XCTUnwrap(model.tree.roots[0].children?.first))
+
+        discoverer.repositoriesByPath[initial.rootURL.standardizedFileURL.path] = repository(
+            at: "/repos/project",
+            worktrees: [worktree("feature/new", at: "/worktrees/feature")]
+        )
+        try XCTUnwrap(watcherFactory.watcher(for: initial.gitDirectoryURL)).signalChange()
+
+        XCTAssertEqual(activationCount, 1)
+        XCTAssertEqual(identityChanges.count, 1)
+        XCTAssertEqual(identityChanges.first?.0.canonicalName, "project")
+        XCTAssertEqual(identityChanges.first?.1.name, "feature/new")
+        XCTAssertEqual(model.selectedWorktreeID, original.id)
+    }
+
+    @MainActor
+    func testWatcherFailureRestoresDiscoveredRepositoryAndLaterRefreshInstallsWatcher() throws {
+        let savedRoot = URL(fileURLWithPath: "/offline/devhq", isDirectory: true)
+        let savedWorktree = PersistedWorktreeState(
+            branchName: "feature/saved",
+            path: "/offline-worktrees/saved",
+            isMain: false,
+            isExpanded: false,
+            isSelected: true
+        )
+        let saved = PersistedRepositoryState(
+            canonicalName: "devhq",
+            rootPath: savedRoot.path,
+            gitDirectoryPath: savedRoot.appendingPathComponent(".git").path,
+            isExpanded: false,
+            worktrees: [savedWorktree]
+        )
+        let recovered = repository(
+            at: savedRoot.path,
+            worktrees: [worktree("feature/recovered", at: savedWorktree.path)]
+        )
+        let discoverer = FakeWorktreeDiscoverer([recovered])
+        let store = FakeWorkspaceStateStore()
+        store.loadedRepositories = [saved]
+        let watcherFactory = FakeRepositoryWatcherFactory()
+        var watcherShouldFail = true
+        let factory: RepositoryWatcherFactory = { url, onChange in
+            if watcherShouldFail { throw CocoaError(.fileReadNoPermission) }
+            return watcherFactory.make(url: url, onChange: onChange)
+        }
+        var activations: [(GitRepositoryInfo, GitWorktreeInfo)] = []
+        let model = WorktreeExplorerModel(
+            discoverer: discoverer,
+            onActivate: { activations.append(($0, $1)) },
+            stateStore: store,
+            watcherFactory: factory,
+            eventDelivery: { $0() }
+        )
+
+        let selection = model.restore()
+
+        XCTAssertEqual(model.repositories.map(\.canonicalName), ["devhq"])
+        XCTAssertEqual(model.repositories[0].worktrees.map(\.name), ["feature/recovered"])
+        XCTAssertEqual(model.selectedWorktreeID, savedWorktree.path)
+        XCTAssertFalse(model.tree.isExpanded(model.tree.roots[0]))
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(selection?.worktree.name, "feature/recovered")
+        XCTAssertEqual(activations.count, 1)
+        XCTAssertEqual(activations.first?.0.canonicalName, "devhq")
+        XCTAssertEqual(activations.first?.1.name, "feature/recovered")
+        XCTAssertEqual(store.repositoryWrites.last?[0].worktrees.map(\.branchName), [
+            "feature/recovered"
+        ])
+        XCTAssertNil(watcherFactory.watcher(for: recovered.gitDirectoryURL))
+
+        watcherShouldFail = false
+        model.refreshRepository(id: recovered.id)
+
+        XCTAssertNotNil(watcherFactory.watcher(for: recovered.gitDirectoryURL))
+        XCTAssertEqual(model.repositories[0].worktrees.map(\.name), ["feature/recovered"])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testDiscoveryFailureKeepsPersistedRepositoryWithoutRewritingState() {
+        let saved = PersistedRepositoryState(
+            canonicalName: "offline",
+            rootPath: "/missing/offline",
+            gitDirectoryPath: "/missing/offline/.git",
+            isExpanded: true,
+            worktrees: [
+                PersistedWorktreeState(
+                    branchName: "main",
+                    path: "/missing/offline",
+                    isMain: true,
+                    isExpanded: false,
+                    isSelected: false
+                )
+            ]
+        )
+        let store = FakeWorkspaceStateStore()
+        store.loadedRepositories = [saved]
+        let watcherFactory = FakeRepositoryWatcherFactory()
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([]),
+            onActivate: { _, _ in },
+            stateStore: store,
+            watcherFactory: watcherFactory.make,
+            eventDelivery: { $0() }
+        )
+
+        XCTAssertNil(model.restore())
+        XCTAssertEqual(model.repositories.map(\.canonicalName), ["offline"])
+        XCTAssertEqual(model.repositories[0].worktrees.map(\.name), ["main"])
+        XCTAssertTrue(model.tree.isExpanded(model.tree.roots[0]))
+        XCTAssertTrue(store.repositoryWrites.isEmpty)
+        XCTAssertTrue(watcherFactory.watchersByPath.isEmpty)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testPersistsRepositoryOrderDiscoveryAndSelectionChanges() throws {
+        let first = repository(
+            at: "/repos/first",
+            worktrees: [worktree("main", at: "/repos/first", isMain: true)]
+        )
+        let second = repository(
+            at: "/repos/second",
+            worktrees: [worktree("topic/branch", at: "/worktrees/topic")]
+        )
+        let store = FakeWorkspaceStateStore()
+        let discoverer = FakeWorktreeDiscoverer([first, second])
+        let model = WorktreeExplorerModel(
+            discoverer: discoverer,
+            onActivate: { _, _ in },
+            stateStore: store,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+
+        try model.addRepository(first.rootURL)
+        try model.addRepository(second.rootURL)
+        XCTAssertEqual(store.repositoryWrites.last?.map(\.canonicalName), ["first", "second"])
+        XCTAssertEqual(store.repositoryWrites.last?.map(\.rootPath), [
+            first.rootURL.path, second.rootURL.path
+        ])
+        XCTAssertEqual(store.repositoryWrites.last?[1].worktrees, [
+            PersistedWorktreeState(
+                branchName: "topic/branch",
+                path: "/worktrees/topic",
+                isMain: false,
+                isExpanded: false,
+                isSelected: false
+            )
+        ])
+
+        model.activate(try XCTUnwrap(model.tree.roots[1].children?.first))
+        XCTAssertEqual(store.repositoryWrites.last?[1].worktrees.first?.isSelected, true)
+
+        model.syncSelection(with: nil)
+        XCTAssertEqual(store.repositoryWrites.last?[1].worktrees.first?.isSelected, false)
+
+        model.removeRepository(id: first.id)
+        XCTAssertEqual(store.repositoryWrites.last?.map(\.canonicalName), ["second"])
+    }
+
+    @MainActor
+    func testRestoreRediscoversWorktreesPreservesExplorerStateAndActivatesSelectionOnce() throws {
+        let firstCurrent = repository(
+            at: "/repos/first",
+            worktrees: [
+                worktree("main", at: "/repos/first", isMain: true),
+                worktree("renamed-branch", at: "/worktrees/selected")
+            ]
+        )
+        let secondCurrent = repository(
+            at: "/repos/second",
+            worktrees: [worktree("main", at: "/repos/second", isMain: true)]
+        )
+        let store = FakeWorkspaceStateStore()
+        store.loadedRepositories = [
+            persistedRepository(
+                canonicalName: "second-custom",
+                repository: secondCurrent,
+                isExpanded: true
+            ),
+            PersistedRepositoryState(
+                canonicalName: "first-custom",
+                rootPath: firstCurrent.rootURL.path,
+                gitDirectoryPath: firstCurrent.gitDirectoryURL.path,
+                isExpanded: false,
+                worktrees: [
+                    PersistedWorktreeState(
+                        branchName: "old-branch-name",
+                        path: "/worktrees/selected",
+                        isMain: false,
+                        isExpanded: false,
+                        isSelected: true
+                    )
+                ]
+            )
+        ]
+        let watcherFactory = FakeRepositoryWatcherFactory()
+        var activations: [(GitRepositoryInfo, GitWorktreeInfo)] = []
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([firstCurrent, secondCurrent]),
+            onActivate: { activations.append(($0, $1)) },
+            stateStore: store,
+            watcherFactory: watcherFactory.make,
+            eventDelivery: { $0() }
+        )
+
+        let selection = model.restore()
+
+        XCTAssertEqual(model.repositories.map(\.canonicalName), [
+            "second-custom", "first-custom"
+        ])
+        XCTAssertTrue(model.tree.isExpanded(model.tree.roots[0]))
+        XCTAssertFalse(model.tree.isExpanded(model.tree.roots[1]))
+        XCTAssertEqual(selection?.worktree.name, "renamed-branch")
+        XCTAssertEqual(model.selectedWorktreeID, "/worktrees/selected")
+        XCTAssertEqual(activations.count, 1)
+        XCTAssertEqual(activations.first?.0.canonicalName, "first-custom")
+        XCTAssertEqual(activations.first?.1.url.path, "/worktrees/selected")
+        XCTAssertNotNil(watcherFactory.watcher(for: firstCurrent.gitDirectoryURL))
+        XCTAssertNotNil(watcherFactory.watcher(for: secondCurrent.gitDirectoryURL))
+        XCTAssertEqual(
+            store.repositoryWrites.last?[1].worktrees.map(\.branchName),
+            ["main", "renamed-branch"]
+        )
+    }
+
+    @MainActor
+    func testRestoreCanDeferSelectedWorktreeActivation() {
+        let current = repository(
+            at: "/repos/project",
+            worktrees: [worktree("main", at: "/repos/project", isMain: true)]
+        )
+        let store = FakeWorkspaceStateStore()
+        store.loadedRepositories = [persistedRepository(
+            canonicalName: "project",
+            repository: current,
+            isExpanded: true,
+            selectedPath: current.rootURL.path
+        )]
+        var activationCount = 0
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in activationCount += 1 },
+            stateStore: store,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+
+        let selection = model.restore(activateSelection: false)
+
+        XCTAssertEqual(selection?.worktree.id, current.worktrees[0].id)
+        XCTAssertEqual(model.selectedWorktreeID, current.worktrees[0].id)
+        XCTAssertEqual(activationCount, 0)
+    }
+
+    @MainActor
+    func testWatcherRefreshPersistsAddedAndRemovedWorktreesAndClearsSelection() throws {
+        let main = worktree("main", at: "/repos/project", isMain: true)
+        let topic = worktree("topic", at: "/worktrees/topic")
+        let initial = repository(at: "/repos/project", worktrees: [main, topic])
+        let discoverer = FakeWorktreeDiscoverer([initial])
+        let watcherFactory = FakeRepositoryWatcherFactory()
+        let store = FakeWorkspaceStateStore()
+        let model = WorktreeExplorerModel(
+            discoverer: discoverer,
+            onActivate: { _, _ in },
+            stateStore: store,
+            watcherFactory: watcherFactory.make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(initial.rootURL)
+        model.activate(try XCTUnwrap(model.tree.roots[0].children?.last))
+        let watcher = try XCTUnwrap(watcherFactory.watcher(for: initial.gitDirectoryURL))
+
+        let added = worktree("added", at: "/worktrees/added")
+        discoverer.repositoriesByPath[initial.rootURL.standardizedFileURL.path] = repository(
+            at: "/repos/project",
+            worktrees: [main, topic, added]
+        )
+        watcher.signalChange()
+        XCTAssertEqual(store.repositoryWrites.last?[0].worktrees.map(\.branchName), [
+            "main", "topic", "added"
+        ])
+
+        discoverer.repositoriesByPath[initial.rootURL.standardizedFileURL.path] = repository(
+            at: "/repos/project",
+            worktrees: [main, added]
+        )
+        watcher.signalChange()
+        XCTAssertNil(model.selectedWorktreeID)
+        XCTAssertFalse(store.repositoryWrites.last?[0].worktrees.contains(where: \.isSelected) ?? true)
+    }
+
+    @MainActor
+    func testTogglePersistsRepositoryExpansionButNotLeafToggles() throws {
+        let current = repository(
+            at: "/repos/project",
+            worktrees: [worktree("main", at: "/repos/project", isMain: true)]
+        )
+        let store = FakeWorkspaceStateStore()
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in },
+            stateStore: store,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(current.rootURL)
+        XCTAssertEqual(store.repositoryWrites.count, 1)
+
+        model.toggle(model.tree.roots[0])
+        XCTAssertEqual(store.repositoryWrites.count, 2)
+        XCTAssertEqual(store.repositoryWrites.last?[0].isExpanded, false)
+
+        model.toggle(try XCTUnwrap(model.tree.roots[0].children?.first))
+        XCTAssertEqual(store.repositoryWrites.count, 2)
+    }
+
     @MainActor
     func testBuildsOneRepositoryBranchPerAddedRepository() throws {
         let first = repository(
@@ -258,6 +652,29 @@ final class WorktreeExplorerModelTests: XCTestCase {
             name: root.lastPathComponent,
             gitDirectoryURL: root.appendingPathComponent(".git", isDirectory: true),
             worktrees: worktrees
+        )
+    }
+
+    private func persistedRepository(
+        canonicalName: String,
+        repository: GitRepositoryInfo,
+        isExpanded: Bool,
+        selectedPath: String? = nil
+    ) -> PersistedRepositoryState {
+        PersistedRepositoryState(
+            canonicalName: canonicalName,
+            rootPath: repository.rootURL.path,
+            gitDirectoryPath: repository.gitDirectoryURL.path,
+            isExpanded: isExpanded,
+            worktrees: repository.worktrees.map { worktree in
+                PersistedWorktreeState(
+                    branchName: worktree.name,
+                    path: worktree.url.path,
+                    isMain: worktree.isMain,
+                    isExpanded: false,
+                    isSelected: worktree.url.path == selectedPath
+                )
+            }
         )
     }
 }

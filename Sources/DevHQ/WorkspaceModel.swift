@@ -23,11 +23,16 @@ final class EditorDocument: ObservableObject, Identifiable {
     @Published var text: String
     private(set) var savedText: String
 
-    init(url: URL, text: String, treeNodeID: String? = nil) {
+    init(
+        url: URL,
+        text: String,
+        savedText: String? = nil,
+        treeNodeID: String? = nil
+    ) {
         self.url = url
         self.treeNodeID = treeNodeID
         self.text = text
-        self.savedText = text
+        self.savedText = savedText ?? text
         self.language = CodeLanguage.detectLanguageFrom(
             url: url,
             prefixBuffer: String(text.prefix(256)),
@@ -50,12 +55,20 @@ final class WorkspaceModel: ObservableObject {
         var selectedDocumentID: UUID?
     }
 
+    private struct PersistentWorkspaceIdentity: Equatable {
+        let canonicalRepositoryName: String
+        let worktreeName: String
+        let rootURL: URL
+    }
+
     @Published private(set) var rootURL: URL?
     let fileTree = TreeModel<String, FileItem>()
     @Published private(set) var documents: [EditorDocument] = []
     @Published var selectedDocumentID: UUID?
     @Published var errorMessage: String?
     private var editorSessions: [URL: EditorSession] = [:]
+    private let stateStore: WorkspaceStatePersisting?
+    private var persistentWorkspaceIdentity: PersistentWorkspaceIdentity?
 
     var selectedDocument: EditorDocument? {
         documents.first { $0.id == selectedDocumentID }
@@ -63,7 +76,11 @@ final class WorkspaceModel: ObservableObject {
 
     var selectedFileNodeID: String? { selectedDocument?.treeNodeID }
 
-    init(arguments: [String] = CommandLine.arguments) {
+    init(
+        arguments: [String] = CommandLine.arguments,
+        stateStore: WorkspaceStatePersisting? = nil
+    ) {
+        self.stateStore = stateStore
         openCommandLineWorkspace(arguments)
     }
 
@@ -80,6 +97,113 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func openWorkspace(_ url: URL) {
+        saveCurrentWorkspaceState()
+        persistentWorkspaceIdentity = nil
+        openNonpersistentWorkspace(url)
+    }
+
+    func openWorktree(
+        canonicalRepositoryName: String,
+        worktreeName: String,
+        url: URL
+    ) {
+        guard stateStore != nil else {
+            openWorkspace(url)
+            return
+        }
+
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        let destination = PersistentWorkspaceIdentity(
+            canonicalRepositoryName: canonicalRepositoryName,
+            worktreeName: worktreeName,
+            rootURL: url
+        )
+
+        if persistentWorkspaceIdentity == destination, rootURL == url {
+            let expandedIDs = fileTree.expandedIDs
+            reloadFileTree(at: url)
+            fileTree.restoreExpandedIDs(expandedIDs)
+            return
+        }
+
+        if persistentWorkspaceIdentity != nil {
+            saveCurrentWorkspaceState()
+        } else {
+            preserveCurrentEditorSession()
+        }
+
+        persistentWorkspaceIdentity = destination
+        rootURL = url
+        documents = []
+        selectedDocumentID = nil
+        reloadFileTree(at: url)
+        restoreWorkspaceState(for: destination)
+    }
+
+    /// Reconciles a branch rename or checkout discovered for the active
+    /// worktree without disturbing its current UI session.
+    func updateCurrentWorktreeIdentity(
+        canonicalRepositoryName: String,
+        worktreeName: String,
+        url: URL
+    ) {
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard let identity = persistentWorkspaceIdentity,
+              identity.canonicalRepositoryName == canonicalRepositoryName,
+              identity.rootURL == url,
+              rootURL == url,
+              identity.worktreeName != worktreeName else { return }
+
+        persistentWorkspaceIdentity = PersistentWorkspaceIdentity(
+            canonicalRepositoryName: canonicalRepositoryName,
+            worktreeName: worktreeName,
+            rootURL: url
+        )
+        saveCurrentWorkspaceState()
+    }
+
+    /// Synchronously persists the active worktree, if it was opened with
+    /// `openWorktree(canonicalRepositoryName:worktreeName:url:)`.
+    func saveCurrentWorkspaceState() {
+        guard let stateStore,
+              let identity = persistentWorkspaceIdentity,
+              rootURL == identity.rootURL else { return }
+
+        let persistedDocuments = documents.compactMap { document -> (String, PersistedEditorTabState)? in
+            guard let path = relativePath(for: document.url, in: identity.rootURL) else {
+                return nil
+            }
+            return (
+                path,
+                PersistedEditorTabState(
+                    path: path,
+                    unsavedText: document.isDirty ? document.text : nil,
+                    savedText: document.isDirty ? document.savedText : nil
+                )
+            )
+        }
+        let persistedDocumentPaths = Set(persistedDocuments.map(\.0))
+        let selectedTabPath = selectedDocument
+            .flatMap { relativePath(for: $0.url, in: identity.rootURL) }
+            .flatMap { persistedDocumentPaths.contains($0) ? $0 : nil }
+        let state = PersistedWorkspaceState(
+            expandedFileNodeIDs: fileTree.expandedIDs.sorted(),
+            tabs: persistedDocuments.map(\.1),
+            selectedTabPath: selectedTabPath
+        )
+
+        do {
+            try stateStore.saveWorkspaceState(
+                state,
+                canonicalRepositoryName: identity.canonicalRepositoryName,
+                worktreeName: identity.worktreeName
+            )
+        } catch {
+            errorMessage = "Could not save workspace state: \(error.localizedDescription)"
+        }
+    }
+
+    private func openNonpersistentWorkspace(_ url: URL) {
         let url = url.standardizedFileURL.resolvingSymlinksInPath()
 
         if rootURL == url {
@@ -172,6 +296,58 @@ final class WorkspaceModel: ObservableObject {
         )
     }
 
+    private func restoreWorkspaceState(for identity: PersistentWorkspaceIdentity) {
+        guard let stateStore else { return }
+
+        let state: PersistedWorkspaceState?
+        do {
+            state = try stateStore.loadWorkspaceState(
+                canonicalRepositoryName: identity.canonicalRepositoryName,
+                worktreeName: identity.worktreeName
+            )
+        } catch {
+            errorMessage = "Could not load workspace state: \(error.localizedDescription)"
+            return
+        }
+        guard let state else { return }
+
+        fileTree.restoreExpandedIDs(state.expandedFileNodeIDs)
+
+        var restoredDocuments: [(path: String, document: EditorDocument)] = []
+        var restoredPaths = Set<String>()
+        for tab in state.tabs {
+            guard !restoredPaths.contains(tab.path),
+                  let url = validatedURL(forRelativePath: tab.path, in: identity.rootURL) else {
+                continue
+            }
+
+            let document: EditorDocument
+            switch (tab.unsavedText, tab.savedText) {
+            case let (.some(text), .some(savedText)):
+                document = EditorDocument(
+                    url: url,
+                    text: text,
+                    savedText: savedText,
+                    treeNodeID: tab.path
+                )
+            case (nil, nil):
+                guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                    continue
+                }
+                document = EditorDocument(url: url, text: text, treeNodeID: tab.path)
+            default:
+                continue
+            }
+            restoredPaths.insert(tab.path)
+            restoredDocuments.append((tab.path, document))
+        }
+
+        documents = restoredDocuments.map(\.document)
+        selectedDocumentID = state.selectedTabPath.flatMap { selectedPath in
+            restoredDocuments.first { $0.path == selectedPath }?.document.id
+        }
+    }
+
     private func reloadFileTree(at url: URL) {
         fileTree.replaceRoots(loadChildren(of: url, relativePath: ""))
     }
@@ -217,11 +393,30 @@ final class WorkspaceModel: ObservableObject {
 
     private func fileNodeID(for url: URL) -> String? {
         guard let rootURL else { return nil }
-        let rootComponents = rootURL.standardizedFileURL.pathComponents
-        let fileComponents = url.standardizedFileURL.pathComponents
+        return relativePath(for: url, in: rootURL)
+    }
+
+    private func relativePath(for url: URL, in rootURL: URL) -> String? {
+        let rootComponents = rootURL.standardizedFileURL
+            .resolvingSymlinksInPath().pathComponents
+        let fileComponents = url.standardizedFileURL
+            .resolvingSymlinksInPath().pathComponents
         guard fileComponents.starts(with: rootComponents),
               fileComponents.count > rootComponents.count else { return nil }
         return fileComponents.dropFirst(rootComponents.count).joined(separator: "/")
+    }
+
+    private func validatedURL(forRelativePath path: String, in rootURL: URL) -> URL? {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+
+        let candidate = rootURL.appendingPathComponent(path).standardizedFileURL
+        guard relativePath(for: candidate, in: rootURL) == path else { return nil }
+        return candidate
     }
 
     private func openCommandLineWorkspace(_ arguments: [String]) {

@@ -19,12 +19,17 @@ struct GitRepositoryInfo: Identifiable, Equatable {
     let id: String
     let rootURL: URL
     let name: String
+    /// Stable user-facing repository key used for persisted workspace state.
+    /// Unlike `name`, this value survives discovery refreshes and is made
+    /// unique by `WorktreeExplorerModel` when the repository is first added.
+    let canonicalName: String
     let gitDirectoryURL: URL
     let worktrees: [GitWorktreeInfo]
 
     init(
         rootURL: URL,
         name: String,
+        canonicalName: String? = nil,
         gitDirectoryURL: URL,
         worktrees: [GitWorktreeInfo]
     ) {
@@ -32,8 +37,19 @@ struct GitRepositoryInfo: Identifiable, Equatable {
         self.id = rootURL.path
         self.rootURL = rootURL
         self.name = name
+        self.canonicalName = canonicalName ?? name
         self.gitDirectoryURL = gitDirectoryURL.standardizedFileURL.resolvingSymlinksInPath()
         self.worktrees = worktrees
+    }
+
+    func withCanonicalName(_ canonicalName: String) -> GitRepositoryInfo {
+        GitRepositoryInfo(
+            rootURL: rootURL,
+            name: name,
+            canonicalName: canonicalName,
+            gitDirectoryURL: gitDirectoryURL,
+            worktrees: worktrees
+        )
     }
 }
 

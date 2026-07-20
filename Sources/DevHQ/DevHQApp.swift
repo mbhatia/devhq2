@@ -3,24 +3,58 @@ import CodeEditTextView
 import Foundation
 import SwiftUI
 
+@MainActor
+final class DevHQApplicationDelegate: NSObject, NSApplicationDelegate {
+    var terminationHandler: (() -> Void)?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        terminationHandler?()
+    }
+}
+
 @main
 struct DevHQApp: App {
+    @NSApplicationDelegateAdaptor(DevHQApplicationDelegate.self)
+    private var applicationDelegate
     @StateObject private var workspace: WorkspaceModel
     @StateObject private var worktreeExplorer: WorktreeExplorerModel
     @StateObject private var plugins: LuaPluginHost
     private static var snapshotWindow: NSWindow?
 
     init() {
-        let workspace = WorkspaceModel()
+        let stateStore = WorkspaceStateStore()
+        let workspace = WorkspaceModel(stateStore: stateStore)
         let worktreeExplorer = WorktreeExplorerModel(
             discoverer: LibGit2WorktreeService(),
-            onActivate: { worktree in workspace.openWorkspace(worktree.url) }
+            onActivate: { repository, worktree in
+                workspace.openWorktree(
+                    canonicalRepositoryName: repository.canonicalName,
+                    worktreeName: worktree.name,
+                    url: worktree.url
+                )
+            },
+            onSelectionIdentityChange: { repository, worktree in
+                workspace.updateCurrentWorktreeIdentity(
+                    canonicalRepositoryName: repository.canonicalName,
+                    worktreeName: worktree.name,
+                    url: worktree.url
+                )
+            },
+            stateStore: stateStore
         )
+        let hasExplicitCommandLineWorkspace = Self.argumentValue(after: "--workspace") != nil
+        worktreeExplorer.restore(activateSelection: !hasExplicitCommandLineWorkspace)
+        if hasExplicitCommandLineWorkspace {
+            worktreeExplorer.syncSelection(with: workspace.rootURL)
+        }
         let plugins = LuaPluginHost()
         plugins.loadUserConfiguration()
         _workspace = StateObject(wrappedValue: workspace)
         _worktreeExplorer = StateObject(wrappedValue: worktreeExplorer)
         _plugins = StateObject(wrappedValue: plugins)
+        applicationDelegate.terminationHandler = {
+            workspace.saveCurrentWorkspaceState()
+        }
 
         NSApplication.shared.setActivationPolicy(.regular)
         DispatchQueue.main.async {

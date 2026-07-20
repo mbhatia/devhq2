@@ -29,6 +29,12 @@ final class TreeModel<ID: Hashable, Value>: ObservableObject {
         )
     }
 
+    /// Replaces the expansion state without implicitly expanding any levels.
+    /// IDs that do not identify a branch in the current tree are discarded.
+    func restoreExpandedIDs<S: Sequence>(_ ids: S) where S.Element == ID {
+        expandedIDs = Set(ids).intersection(Self.branchIDs(in: roots))
+    }
+
     func isExpanded(_ node: TreeNode<ID, Value>) -> Bool {
         expandedIDs.contains(node.id)
     }
@@ -76,6 +82,17 @@ final class TreeModel<ID: Hashable, Value>: ObservableObject {
                     in: children,
                     remainingLevels: remainingLevels - 1
                 ))
+            }
+        }
+        return result
+    }
+
+    private static func branchIDs(in nodes: [TreeNode<ID, Value>]) -> Set<ID> {
+        var result = Set<ID>()
+        for node in nodes where node.isBranch {
+            result.insert(node.id)
+            if let children = node.children {
+                result.formUnion(branchIDs(in: children))
             }
         }
         return result

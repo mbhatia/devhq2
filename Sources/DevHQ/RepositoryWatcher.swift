@@ -11,11 +11,13 @@ typealias RepositoryWatcherFactory = (
     _ onChange: @escaping () -> Void
 ) throws -> any RepositoryWatching
 
-/// Watches the common Git directory and its linked-worktree metadata directory.
+/// Watches the common Git directory and its linked-worktree metadata directories.
 ///
-/// Dispatch sources are directory-local rather than recursive, so both locations
-/// are watched. The sources are rebuilt after an event to pick up creation or
-/// removal of the `worktrees` directory itself.
+/// Dispatch sources are directory-local rather than recursive, so the common
+/// directory, `worktrees`, and each current worktree metadata child are watched.
+/// Each child's `HEAD` is watched as well because changing an existing file does
+/// not produce a vnode event for its parent directory. The sources are rebuilt
+/// after an event to pick up additions, replacements, and removals.
 final class RepositoryWatcher: RepositoryWatching {
     enum WatchError: LocalizedError {
         case cannotOpen(URL)
@@ -74,10 +76,22 @@ final class RepositoryWatcher: RepositoryWatching {
 
     private func installSources() throws {
         let worktreesURL = gitDirectoryURL.appendingPathComponent("worktrees", isDirectory: true)
-        let urls = [gitDirectoryURL, worktreesURL].filter {
-            var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectory)
-                && isDirectory.boolValue
+        var urls = [gitDirectoryURL]
+
+        if isDirectory(worktreesURL) {
+            urls.append(worktreesURL)
+            let children = try FileManager.default.contentsOfDirectory(
+                at: worktreesURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+            )
+            for child in children.filter(isDirectory).sorted(by: { $0.path < $1.path }) {
+                urls.append(child)
+                let headURL = child.appendingPathComponent("HEAD")
+                if FileManager.default.fileExists(atPath: headURL.path) {
+                    urls.append(headURL)
+                }
+            }
         }
 
         var replacements: [DispatchSourceFileSystemObject] = []
@@ -97,6 +111,12 @@ final class RepositoryWatcher: RepositoryWatching {
         sources = replacements
         oldSources.forEach { $0.cancel() }
         sources.forEach { $0.resume() }
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
     }
 
     private func makeSource(for url: URL) throws -> DispatchSourceFileSystemObject {
