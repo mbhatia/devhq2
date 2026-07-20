@@ -16,6 +16,9 @@ final class DevHQApplicationDelegate: NSObject, NSApplicationDelegate {
 struct DevHQApp: App {
     @NSApplicationDelegateAdaptor(DevHQApplicationDelegate.self)
     private var applicationDelegate
+    @StateObject private var commandManager: CommandManager
+    @StateObject private var commandPalette: CommandPaletteController
+    @StateObject private var commandContext: CommandContextTracker
     @StateObject private var workspace: WorkspaceModel
     @StateObject private var worktreeExplorer: WorktreeExplorerModel
     @StateObject private var plugins: LuaPluginHost
@@ -23,11 +26,10 @@ struct DevHQApp: App {
     private static var snapshotWindow: NSWindow?
 
     init() {
-        let plugins = LuaPluginHost()
-        plugins.loadUserConfiguration()
-        let layout = WorkspaceLayoutModel(
-            fileExplorerFallbackWidth: plugins.settings.treeViewSize
-        )
+        let commandManager = CommandManager()
+        let commandPalette = CommandPaletteController(commandManager: commandManager)
+        let commandContext = CommandContextTracker()
+        let plugins = LuaPluginHost(commandManager: commandManager)
         let stateStore = WorkspaceStateStore()
         let workspace = WorkspaceModel(stateStore: stateStore)
         let worktreeExplorer = WorktreeExplorerModel(
@@ -48,11 +50,28 @@ struct DevHQApp: App {
             },
             stateStore: stateStore
         )
+        do {
+            try registerBuiltInCommands(
+                in: commandManager,
+                workspace: workspace,
+                worktreeExplorer: worktreeExplorer
+            )
+        } catch {
+            plugins.settings.pluginError =
+                "Could not register built-in commands: \(error.localizedDescription)"
+        }
+        plugins.loadUserConfiguration()
+        let layout = WorkspaceLayoutModel(
+            fileExplorerFallbackWidth: plugins.settings.treeViewSize
+        )
         let hasExplicitCommandLineWorkspace = Self.argumentValue(after: "--workspace") != nil
         worktreeExplorer.restore(activateSelection: !hasExplicitCommandLineWorkspace)
         if hasExplicitCommandLineWorkspace {
             worktreeExplorer.syncSelection(with: workspace.rootURL)
         }
+        _commandManager = StateObject(wrappedValue: commandManager)
+        _commandPalette = StateObject(wrappedValue: commandPalette)
+        _commandContext = StateObject(wrappedValue: commandContext)
         _workspace = StateObject(wrappedValue: workspace)
         _worktreeExplorer = StateObject(wrappedValue: worktreeExplorer)
         _plugins = StateObject(wrappedValue: plugins)
@@ -91,7 +110,10 @@ struct DevHQApp: App {
                 workspace: workspace,
                 worktreeExplorer: worktreeExplorer,
                 settings: plugins.settings,
-                layout: layout
+                layout: layout,
+                commandManager: commandManager,
+                commandPalette: commandPalette,
+                commandContext: commandContext
             )
                 .frame(minWidth: 900, minHeight: 600)
         }
@@ -110,6 +132,14 @@ struct DevHQApp: App {
                 .keyboardShortcut("s")
                 .disabled(workspace.selectedDocument == nil)
             }
+            CommandGroup(after: .saveItem) {
+                Button("Command Palette…") {
+                    commandPalette.present(
+                        in: commandContext.snapshot(workspace: workspace)
+                    )
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+            }
         }
     }
 
@@ -117,16 +147,32 @@ struct DevHQApp: App {
         settings: EditorSettings,
         layout: WorkspaceLayoutModel
     ) {
+        let commandManager = CommandManager()
+        let commandPalette = CommandPaletteController(commandManager: commandManager)
+        let commandContext = CommandContextTracker()
         let model = WorkspaceModel()
         let worktreeExplorer = WorktreeExplorerModel(
             discoverer: LibGit2WorktreeService(),
             onActivate: { worktree in model.openWorkspace(worktree.url) }
         )
+        do {
+            try registerBuiltInCommands(
+                in: commandManager,
+                workspace: model,
+                worktreeExplorer: worktreeExplorer
+            )
+        } catch {
+            model.errorMessage =
+                "Could not register built-in commands: \(error.localizedDescription)"
+        }
         let content = ContentView(
             workspace: model,
             worktreeExplorer: worktreeExplorer,
             settings: settings,
             layout: layout,
+            commandManager: commandManager,
+            commandPalette: commandPalette,
+            commandContext: commandContext,
             tracksLayoutChanges: false
         )
             .frame(width: 1200, height: 760)

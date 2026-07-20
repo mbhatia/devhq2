@@ -9,6 +9,26 @@ struct FileItem {
 
 typealias FileNode = TreeNode<String, FileItem>
 
+enum WorkspaceCommandOperationError: LocalizedError, Equatable {
+    case noWorkspace
+    case outsideWorkspace(URL)
+    case targetExists(URL)
+    case parentDirectoryMissing(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .noWorkspace:
+            "Open a workspace before creating files or directories."
+        case .outsideWorkspace(let url):
+            "\(url.path) is outside the current workspace."
+        case .targetExists(let url):
+            "\(url.lastPathComponent) already exists."
+        case .parentDirectoryMissing(let url):
+            "The parent directory \(url.path) does not exist."
+        }
+    }
+}
+
 extension TreeNode where ID == String, Value == FileItem {
     var url: URL { value.url }
     var name: String { value.name }
@@ -271,6 +291,46 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
+    /// Closes the active tab. Unsaved text is discarded, matching the existing
+    /// tab close button behavior.
+    func closeSelected() {
+        guard let selectedDocument else { return }
+        close(selectedDocument)
+    }
+
+    @discardableResult
+    func createFile(at url: URL) throws -> EditorDocument {
+        do {
+            let target = try validatedCreationTarget(url)
+            try Data().write(to: target, options: .withoutOverwriting)
+            refreshFileTreePreservingExpansion()
+            openFile(target)
+            errorMessage = nil
+            guard let selectedDocument, selectedDocument.url == target else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            return selectedDocument
+        } catch {
+            errorMessage = "Could not create file: \(error.localizedDescription)"
+            throw error
+        }
+    }
+
+    func createDirectory(at url: URL) throws {
+        do {
+            let target = try validatedCreationTarget(url)
+            try FileManager.default.createDirectory(
+                at: target,
+                withIntermediateDirectories: false
+            )
+            refreshFileTreePreservingExpansion()
+            errorMessage = nil
+        } catch {
+            errorMessage = "Could not create directory: \(error.localizedDescription)"
+            throw error
+        }
+    }
+
     func saveSelected() {
         guard let document = selectedDocument else { return }
         do {
@@ -352,6 +412,13 @@ final class WorkspaceModel: ObservableObject {
         fileTree.replaceRoots(loadChildren(of: url, relativePath: ""))
     }
 
+    private func refreshFileTreePreservingExpansion() {
+        guard let rootURL else { return }
+        let expandedIDs = fileTree.expandedIDs
+        reloadFileTree(at: rootURL)
+        fileTree.restoreExpandedIDs(expandedIDs)
+    }
+
     private func revealSelectedDocument() {
         if let treeNodeID = selectedDocument?.treeNodeID {
             fileTree.reveal(treeNodeID)
@@ -417,6 +484,25 @@ final class WorkspaceModel: ObservableObject {
         let candidate = rootURL.appendingPathComponent(path).standardizedFileURL
         guard relativePath(for: candidate, in: rootURL) == path else { return nil }
         return candidate
+    }
+
+    private func validatedCreationTarget(_ url: URL) throws -> URL {
+        guard let rootURL else { throw WorkspaceCommandOperationError.noWorkspace }
+        let target = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard relativePath(for: target, in: rootURL) != nil else {
+            throw WorkspaceCommandOperationError.outsideWorkspace(target)
+        }
+        guard !FileManager.default.fileExists(atPath: target.path) else {
+            throw WorkspaceCommandOperationError.targetExists(target)
+        }
+
+        let parent = target.deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw WorkspaceCommandOperationError.parentDirectoryMissing(parent)
+        }
+        return target
     }
 
     private func openCommandLineWorkspace(_ arguments: [String]) {

@@ -242,18 +242,41 @@ final class LuaPluginHost: ObservableObject {
 
     let settings: EditorSettings
     let configDirectory: URL
+    let commandManager: CommandManager
     private let state = LuaState(libraries: .all)
 
     convenience init() {
         self.init(
             settings: EditorSettings(),
-            configDirectory: Self.defaultConfigDirectory()
+            configDirectory: Self.defaultConfigDirectory(),
+            commandManager: CommandManager()
         )
     }
 
-    init(settings: EditorSettings, configDirectory: URL) {
+    convenience init(commandManager: CommandManager) {
+        self.init(
+            settings: EditorSettings(),
+            configDirectory: Self.defaultConfigDirectory(),
+            commandManager: commandManager
+        )
+    }
+
+    convenience init(settings: EditorSettings, configDirectory: URL) {
+        self.init(
+            settings: settings,
+            configDirectory: configDirectory,
+            commandManager: CommandManager()
+        )
+    }
+
+    init(
+        settings: EditorSettings,
+        configDirectory: URL,
+        commandManager: CommandManager
+    ) {
         self.settings = settings
         self.configDirectory = configDirectory
+        self.commandManager = commandManager
         state.setRequireRoot(configDirectory.path)
         do {
             try registerModule()
@@ -292,6 +315,17 @@ final class LuaPluginHost: ObservableObject {
     }
 
     private func registerModule() throws {
+        let commandAPI = LuaCommandAPI(commandManager: commandManager)
+        commandAPI.pushLuaTable(onto: state)
+        let commandTable = state.popref()
+        let openCommandModule: LuaClosure = { state in
+            state.push(commandTable)
+            return 1
+        }
+        try state.requiref(name: commandAPI.luaName, global: false) {
+            state.push(openCommandModule)
+        }
+
         let modules: [any LuaModuleRegistrable] = [
             LuaCoreAPI(apiVersion: Self.apiVersion, configDirectory: configDirectory.path),
             LuaWindowAPI(settings: settings),
@@ -300,11 +334,13 @@ final class LuaPluginHost: ObservableObject {
             LuaDocViewAPI(settings: settings)
         ]
         let openModule: LuaClosure = { state in
-            state.newtable(nrec: CInt(modules.count))
+            state.newtable(nrec: CInt(modules.count + 1))
             for module in modules {
                 module.pushLuaTable(onto: state)
                 state.rawset(-2, utf8Key: module.luaName)
             }
+            state.push(commandTable)
+            state.rawset(-2, utf8Key: commandAPI.luaName)
             return 1
         }
         try state.requiref(name: "devhq", global: false) {

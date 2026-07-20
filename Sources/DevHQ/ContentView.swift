@@ -1,73 +1,129 @@
 import AppKit
 import SwiftUI
 
+@MainActor
+final class CommandContextTracker: ObservableObject {
+    @Published private(set) var activeView: CommandViewKind
+
+    init(activeView: CommandViewKind = .worktree) {
+        self.activeView = activeView
+    }
+
+    func activate(_ view: CommandViewKind) {
+        activeView = view
+    }
+
+    func snapshot(workspace: WorkspaceModel) -> CommandContext {
+        let selectedURL = workspace.selectedDocument?.url
+        return CommandContext(
+            view: activeView,
+            worktreeURL: workspace.rootURL,
+            fileURL: selectedURL,
+            documentURL: selectedURL
+        )
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var worktreeExplorer: WorktreeExplorerModel
     @ObservedObject var settings: EditorSettings
     @ObservedObject var layout: WorkspaceLayoutModel
+    @ObservedObject var commandManager: CommandManager
+    @ObservedObject var commandPalette: CommandPaletteController
+    @ObservedObject var commandContext: CommandContextTracker
     var tracksLayoutChanges = true
     @State private var hasRestoredLayout = false
     @State private var layoutRestorationRequestID = 0
 
     var body: some View {
-        HSplitView {
-            if settings.treeViewVisible {
-                WorktreeExplorerSidebar(explorer: worktreeExplorer, workspace: workspace)
-                    .frame(
-                        minWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.lowerBound,
-                        idealWidth: layout.worktreeExplorerWidth,
-                        maxWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.upperBound
-                    )
-                    .background {
-                        ZStack {
-                            WorkspaceSplitViewRestorer(
-                                worktreeExplorerWidth: layout.worktreeExplorerWidth,
-                                fileExplorerWidth: layout.fileExplorerWidth,
-                                requestID: layoutRestorationRequestID
-                            ) {
-                                if tracksLayoutChanges,
-                                   abs(settings.treeViewSize - layout.fileExplorerWidth)
-                                    >= WorkspaceLayoutModel.widthUpdateTolerance {
-                                    settings.treeViewSize = layout.fileExplorerWidth
+        ZStack {
+            HSplitView {
+                if settings.treeViewVisible {
+                    WorktreeExplorerSidebar(explorer: worktreeExplorer, workspace: workspace)
+                        .frame(
+                            minWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.lowerBound,
+                            idealWidth: layout.worktreeExplorerWidth,
+                            maxWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.upperBound
+                        )
+                        .background {
+                            ZStack {
+                                WorkspaceSplitViewRestorer(
+                                    worktreeExplorerWidth: layout.worktreeExplorerWidth,
+                                    fileExplorerWidth: layout.fileExplorerWidth,
+                                    requestID: layoutRestorationRequestID
+                                ) {
+                                    if tracksLayoutChanges,
+                                       abs(settings.treeViewSize - layout.fileExplorerWidth)
+                                        >= WorkspaceLayoutModel.widthUpdateTolerance {
+                                        settings.treeViewSize = layout.fileExplorerWidth
+                                    }
+                                    hasRestoredLayout = true
                                 }
-                                hasRestoredLayout = true
-                            }
 
-                            PaneWidthObserver { width in
-                                guard tracksLayoutChanges, hasRestoredLayout else { return }
-                                layout.updateWorktreeExplorerWidth(width)
+                                PaneWidthObserver { width in
+                                    guard tracksLayoutChanges, hasRestoredLayout else { return }
+                                    layout.updateWorktreeExplorerWidth(width)
+                                }
+
+                                PaneActivationMonitor(
+                                    isEnabled: !commandPalette.isPresented
+                                ) {
+                                    commandContext.activate(.worktree)
+                                }
                             }
                         }
-                    }
 
-                Sidebar(workspace: workspace)
-                    .frame(
-                        minWidth: WorkspaceLayoutState.fileExplorerWidthRange.lowerBound,
-                        idealWidth: layout.fileExplorerWidth,
-                        maxWidth: WorkspaceLayoutState.fileExplorerWidthRange.upperBound
-                    )
-                    .background {
-                        PaneWidthObserver { width in
-                            guard tracksLayoutChanges, hasRestoredLayout else { return }
-                            layout.updateFileExplorerWidth(width)
-                            if abs(settings.treeViewSize - layout.fileExplorerWidth)
-                                >= WorkspaceLayoutModel.widthUpdateTolerance {
-                                settings.treeViewSize = layout.fileExplorerWidth
+                    Sidebar(workspace: workspace)
+                        .frame(
+                            minWidth: WorkspaceLayoutState.fileExplorerWidthRange.lowerBound,
+                            idealWidth: layout.fileExplorerWidth,
+                            maxWidth: WorkspaceLayoutState.fileExplorerWidthRange.upperBound
+                        )
+                        .background {
+                            ZStack {
+                                PaneWidthObserver { width in
+                                    guard tracksLayoutChanges, hasRestoredLayout else { return }
+                                    layout.updateFileExplorerWidth(width)
+                                    if abs(settings.treeViewSize - layout.fileExplorerWidth)
+                                        >= WorkspaceLayoutModel.widthUpdateTolerance {
+                                        settings.treeViewSize = layout.fileExplorerWidth
+                                    }
+                                }
+
+                                PaneActivationMonitor(
+                                    isEnabled: !commandPalette.isPresented
+                                ) {
+                                    commandContext.activate(.file)
+                                }
                             }
+                        }
+                }
+
+                EditorArea(workspace: workspace, settings: settings)
+                    .frame(minWidth: 500, maxWidth: .infinity)
+                    .background {
+                        PaneActivationMonitor(isEnabled: !commandPalette.isPresented) {
+                            commandContext.activate(.document)
                         }
                     }
             }
 
-            EditorArea(workspace: workspace, settings: settings)
-                .frame(minWidth: 500, maxWidth: .infinity)
+            CommandPalette(controller: commandPalette)
         }
         .preferredColorScheme(settings.windowTheme.colorScheme)
         .onAppear {
             worktreeExplorer.syncSelection(with: workspace.rootURL)
+            commandContext.activate(initialCommandView)
         }
         .onChange(of: workspace.rootURL) { rootURL in
             worktreeExplorer.syncSelection(with: rootURL)
+            commandContext.activate(initialCommandView)
+        }
+        .onChange(of: workspace.selectedDocumentID) { selectedDocumentID in
+            if selectedDocumentID != nil {
+                commandContext.activate(.document)
+            }
         }
         .onChange(of: settings.treeViewSize) { width in
             guard tracksLayoutChanges,
@@ -130,6 +186,12 @@ struct ContentView: View {
             )
         }
     }
+
+    private var initialCommandView: CommandViewKind {
+        if workspace.selectedDocument != nil { return .document }
+        if workspace.rootURL != nil { return .file }
+        return .worktree
+    }
 }
 
 private struct PaneWidthObserver: View {
@@ -144,6 +206,84 @@ private struct PaneWidthObserver: View {
                 .onChange(of: geometry.size.width) { width in
                     onChange(width)
                 }
+        }
+    }
+}
+
+/// Observes pane clicks without adding a SwiftUI gesture above AppKit-backed
+/// editor views or participating in hit testing.
+private struct PaneActivationMonitor: NSViewRepresentable {
+    let isEnabled: Bool
+    let onActivate: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isEnabled: isEnabled, onActivate: onActivate)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = PassthroughView(frame: .zero)
+        context.coordinator.install(for: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.onActivate = onActivate
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    private final class PassthroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+
+    final class Coordinator {
+        var isEnabled: Bool
+        var onActivate: () -> Void
+        private weak var view: NSView?
+        private var monitor: Any?
+
+        init(isEnabled: Bool, onActivate: @escaping () -> Void) {
+            self.isEnabled = isEnabled
+            self.onActivate = onActivate
+        }
+
+        deinit {
+            uninstall()
+        }
+
+        func install(for view: NSView) {
+            self.view = view
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak self] event in
+                guard let self,
+                      self.isEnabled,
+                      let view = self.view,
+                      event.window === view.window,
+                      view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+                else { return event }
+
+                // The deferred repeat keeps the pane click authoritative when
+                // its action also opens or restores a document.
+                self.onActivate()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.isEnabled else { return }
+                    self.onActivate()
+                }
+                return event
+            }
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
         }
     }
 }
