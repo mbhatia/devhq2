@@ -6,6 +6,29 @@ struct PersistedRepositoryState: Codable, Equatable {
     let gitDirectoryPath: String
     let isExpanded: Bool
     let worktrees: [PersistedWorktreeState]
+    let server: String?
+    let remotePath: String?
+    let lastSyncError: String?
+
+    init(
+        canonicalName: String,
+        rootPath: String,
+        gitDirectoryPath: String,
+        isExpanded: Bool,
+        worktrees: [PersistedWorktreeState],
+        server: String? = nil,
+        remotePath: String? = nil,
+        lastSyncError: String? = nil
+    ) {
+        self.canonicalName = canonicalName
+        self.rootPath = rootPath
+        self.gitDirectoryPath = gitDirectoryPath
+        self.isExpanded = isExpanded
+        self.worktrees = worktrees
+        self.server = server
+        self.remotePath = remotePath
+        self.lastSyncError = lastSyncError
+    }
 }
 
 struct PersistedWorktreeState: Codable, Equatable {
@@ -15,6 +38,7 @@ struct PersistedWorktreeState: Codable, Equatable {
     let isExpanded: Bool
     let isSelected: Bool
     let agents: [PersistedAgentState]
+    let remotePath: String?
 
     init(
         branchName: String,
@@ -22,7 +46,8 @@ struct PersistedWorktreeState: Codable, Equatable {
         isMain: Bool,
         isExpanded: Bool,
         isSelected: Bool,
-        agents: [PersistedAgentState] = []
+        agents: [PersistedAgentState] = [],
+        remotePath: String? = nil
     ) {
         self.branchName = branchName
         self.path = path
@@ -30,6 +55,7 @@ struct PersistedWorktreeState: Codable, Equatable {
         self.isExpanded = isExpanded
         self.isSelected = isSelected
         self.agents = agents
+        self.remotePath = remotePath
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -39,6 +65,7 @@ struct PersistedWorktreeState: Codable, Equatable {
         case isExpanded
         case isSelected
         case agents
+        case remotePath
     }
 
     init(from decoder: Decoder) throws {
@@ -49,6 +76,7 @@ struct PersistedWorktreeState: Codable, Equatable {
         isExpanded = try container.decode(Bool.self, forKey: .isExpanded)
         isSelected = try container.decode(Bool.self, forKey: .isSelected)
         agents = try container.decodeIfPresent([PersistedAgentState].self, forKey: .agents) ?? []
+        remotePath = try container.decodeIfPresent(String.self, forKey: .remotePath)
     }
 }
 

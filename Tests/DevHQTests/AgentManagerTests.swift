@@ -112,6 +112,48 @@ final class AgentManagerTests: XCTestCase {
         fixture.manager.removeAgents(inWorktree: fixture.worktree.url)
     }
 
+    func testRemoteAgentContextUsesRealRemoteRepositoryAndWorktreePaths() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let worktree = GitWorktreeInfo(
+            name: "feature",
+            url: directory.appendingPathComponent("mirror", isDirectory: true),
+            isMain: false,
+            remotePath: "/srv/repos/project.worktrees/feature"
+        )
+        let source = try SSHRemoteRepositorySource(
+            server: "builder@example.com",
+            remotePath: "/srv/repos/project"
+        )
+        let repository = GitRepositoryInfo(
+            rootURL: directory,
+            name: "project",
+            canonicalName: "project@builder",
+            gitDirectoryURL: directory.appendingPathComponent("mirror.git", isDirectory: true),
+            worktrees: [worktree],
+            remoteSource: source
+        )
+        let context = AgentWorktreeContext(repository: repository, worktree: worktree)
+
+        XCTAssertEqual(context.remoteSource, source)
+        XCTAssertEqual(context.remoteWorktreePath, "/srv/repos/project.worktrees/feature")
+        XCTAssertEqual(
+            AgentManager.launchEnvironment(
+                profileName: "custom",
+                name: "code reviewer",
+                threadID: "thread-7",
+                context: context
+            ),
+            [
+                "REPO": "/srv/repos/project",
+                "REPO_ID": "project@builder",
+                "AGENT_PROFILE": "custom",
+                "AGENT_NAME": "code-reviewer",
+                "THREAD_ID": "thread-7"
+            ]
+        )
+    }
+
     func testResumeCommandPrecedenceAndMissingResumeThread() throws {
         let output = temporaryFileURL()
         let commands = Self.profile(

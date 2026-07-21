@@ -4,6 +4,88 @@ import XCTest
 
 final class WorkspaceTerminalLaunchTests: XCTestCase {
     @MainActor
+    func testRemoteLoginShellUsesSSHAndQuotesTheRealWorktreePath() {
+        let remotePath = "/srv/repos/a developer's checkout"
+        let script = "cd \(shellQuote(remotePath)) && exec ${SHELL:-/bin/sh} -l"
+
+        XCTAssertEqual(
+            WorkspaceModel.remoteLoginShellCommandArguments(
+                server: "build@example.com",
+                remoteWorkingDirectory: remotePath
+            ),
+            [
+                "ssh",
+                "-At",
+                "build@example.com",
+                "/bin/sh -c \(shellQuote(script))"
+            ]
+        )
+    }
+
+    @MainActor
+    func testRemoteExplicitCommandPreservesArgvWithoutLocalExpansion() {
+        let script = "cd '/srv/a worktree' && exec "
+            + "'/usr/bin/printf' '%s' '$HOME'\\''s value'"
+        let arguments = WorkspaceModel.remoteCommandArguments(
+            server: "build",
+            remoteWorkingDirectory: "/srv/a worktree",
+            command: ["/usr/bin/printf", "%s", "$HOME's value"]
+        )
+        XCTAssertEqual(arguments, ["ssh", "-At", "build", "/bin/sh -c \(shellQuote(script))"])
+    }
+
+    @MainActor
+    func testRemoteAgentCommandInstallsEnvironmentBeforeSelectedRemoteShellParsesCommand() {
+        let command = "printf '%s' \"$REPO:$THREAD_ID\"; untouched=$(remote-only)"
+        let arguments = WorkspaceModel.remoteShellCommandArguments(
+            server: "devbox",
+            remoteWorkingDirectory: "/worktrees/feature's copy",
+            shellCommand: command,
+            environment: [
+                "REPO": "/repos/project",
+                "AGENT_NAME": "reviewer's-agent",
+                "THREAD_ID": "thread-$REMOTE"
+            ]
+        )
+
+        let invocation = [
+            "/usr/bin/env",
+            "AGENT_NAME=reviewer's-agent",
+            "REPO=/repos/project",
+            "THREAD_ID=thread-$REMOTE"
+        ].map { shellQuote($0) }.joined(separator: " ")
+            + " \"${SHELL:-/bin/sh}\" -l -c \(shellQuote(command))"
+        let script = "cd \(shellQuote("/worktrees/feature's copy")) && exec \(invocation)"
+        XCTAssertEqual(
+            arguments,
+            ["ssh", "-At", "devbox", "/bin/sh -c \(shellQuote(script))"]
+        )
+    }
+
+    @MainActor
+    func testRemoteBuiltInCodexDispatcherSelectsTheShellOnTheRemoteHost() {
+        let arguments = WorkspaceModel.remoteShellCommandArguments(
+            server: "devbox",
+            remoteWorkingDirectory: "/srv/project",
+            shellCommand: "ignored session wrapper",
+            environment: [
+                "REPO": "/srv/project",
+                "REPO_ID": "project",
+                "AGENT_PROFILE": "codex",
+                "AGENT_NAME": "reviewer"
+            ],
+            builtInCodexBody: #"exec codex --add-dir "$REPO""#
+        )
+
+        XCTAssertEqual(Array(arguments.prefix(3)), ["ssh", "-At", "devbox"])
+        XCTAssertTrue(arguments[3].contains("command -v shpool"))
+        XCTAssertTrue(arguments[3].contains("command -v atch"))
+        XCTAssertTrue(arguments[3].contains("${SHELL:-/bin/sh}"))
+        XCTAssertTrue(arguments[3].contains("exec codex --add-dir"))
+        XCTAssertFalse(arguments[3].contains("ignored session wrapper"))
+    }
+
+    @MainActor
     func testShellCommandLaunchUsesSelectedLoginShellAndStableEnvironmentArguments() {
         XCTAssertEqual(
             WorkspaceModel.shellCommandArguments(
@@ -129,5 +211,9 @@ final class WorkspaceTerminalLaunchTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

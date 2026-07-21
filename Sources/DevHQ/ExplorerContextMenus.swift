@@ -12,6 +12,8 @@ enum ExplorerContextMenuError: LocalizedError {
     case repositoryUnavailable
     case worktreeUnavailable
     case cannotDeleteMainWorktree
+    case cannotCreateRemoteWorktree
+    case cannotDeleteRemoteWorktree
     case unsavedChanges(URL)
     case couldNotOpen(URL)
 
@@ -23,6 +25,10 @@ enum ExplorerContextMenuError: LocalizedError {
             "The selected worktree is no longer available."
         case .cannotDeleteMainWorktree:
             "The main worktree cannot be deleted."
+        case .cannotCreateRemoteWorktree:
+            "Remote repositories do not support local worktree creation."
+        case .cannotDeleteRemoteWorktree:
+            "Remote repositories do not support local worktree deletion."
         case .unsavedChanges(let url):
             "Save or close unsaved documents in \(url.lastPathComponent) before removing it."
         case .couldNotOpen(let url):
@@ -67,6 +73,9 @@ func registerBuiltInContextMenus(
         guard let repository = repository(for: snapshot, in: worktreeExplorer) else {
             throw ExplorerContextMenuError.repositoryUnavailable
         }
+        guard repository.remoteSource == nil else {
+            throw ExplorerContextMenuError.cannotCreateRemoteWorktree
+        }
         guard let branchName = promptForBranchName() else { return }
         let targetURL = worktreeCreationURL(
             repositoryRootURL: repository.rootURL,
@@ -91,6 +100,9 @@ func registerBuiltInContextMenus(
             in: worktreeExplorer
         ) else {
             throw ExplorerContextMenuError.worktreeUnavailable
+        }
+        guard repository.remoteSource == nil else {
+            throw ExplorerContextMenuError.cannotDeleteRemoteWorktree
         }
         guard !worktree.isMain else {
             throw ExplorerContextMenuError.cannotDeleteMainWorktree

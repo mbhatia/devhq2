@@ -145,6 +145,11 @@ enum EditorTab: Identifiable {
 
 @MainActor
 final class WorkspaceModel: ObservableObject {
+    private struct RemoteExecutionContext: Equatable {
+        let source: SSHRemoteRepositorySource
+        let worktreePath: String
+    }
+
     private struct EditorSession {
         var documents: [EditorDocument]
         var tabs: [EditorTab]
@@ -174,6 +179,9 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var fileFilterComparisonRevision = "unloaded"
     @Published var errorMessage: String?
     private var editorSessions: [URL: EditorSession] = [:]
+    /// Execution remains remote even though editor sessions and file browsing
+    /// use the local mirror identified by this key.
+    private var remoteExecutionContexts: [String: RemoteExecutionContext] = [:]
     private let stateStore: WorkspaceStatePersisting?
     private var persistentWorkspaceIdentity: PersistentWorkspaceIdentity?
     private var lastSelectedDocumentID: UUID?
@@ -225,20 +233,36 @@ final class WorkspaceModel: ObservableObject {
     func openWorkspace(_ url: URL) {
         saveCurrentWorkspaceState()
         persistentWorkspaceIdentity = nil
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        remoteExecutionContexts.removeValue(forKey: Self.canonicalPath(url))
         openNonpersistentWorkspace(url)
     }
 
     func openWorktree(
         canonicalRepositoryName: String,
         worktreeName: String,
-        url: URL
+        url: URL,
+        remoteSource: SSHRemoteRepositorySource? = nil,
+        remotePath: String? = nil
     ) {
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        let executionKey = Self.canonicalPath(url)
+        if let remoteSource, let remotePath {
+            remoteExecutionContexts[executionKey] = RemoteExecutionContext(
+                source: remoteSource,
+                worktreePath: remotePath
+            )
+        } else {
+            remoteExecutionContexts.removeValue(forKey: executionKey)
+        }
+
         guard stateStore != nil else {
-            openWorkspace(url)
+            saveCurrentWorkspaceState()
+            persistentWorkspaceIdentity = nil
+            openNonpersistentWorkspace(url)
             return
         }
 
-        let url = url.standardizedFileURL.resolvingSymlinksInPath()
         let destination = PersistentWorkspaceIdentity(
             canonicalRepositoryName: canonicalRepositoryName,
             worktreeName: worktreeName,
@@ -468,6 +492,43 @@ final class WorkspaceModel: ObservableObject {
             throw WorkspaceCommandOperationError.invalidTerminalWorkingDirectory(workingDirectory)
         }
 
+        let launchCommand: [String]?
+        let launchShell: String?
+        if let remote = remoteExecutionContext(for: rootURL) {
+            // Remote worktrees are local browsing caches. Execute an explicit
+            // argv command on the server; otherwise open its login shell.
+            launchCommand = if let command, !command.isEmpty {
+                Self.remoteCommandArguments(
+                    server: remote.source.server,
+                    remoteWorkingDirectory: remote.worktreePath,
+                    command: command
+                )
+            } else {
+                Self.remoteLoginShellCommandArguments(
+                    server: remote.source.server,
+                    remoteWorkingDirectory: remote.worktreePath
+                )
+            }
+            launchShell = nil
+        } else {
+            launchCommand = command
+            launchShell = shell
+        }
+
+        return try appendTerminal(
+            rootURL: rootURL,
+            workingDirectory: workingDirectory,
+            command: launchCommand,
+            shell: launchShell
+        )
+    }
+
+    private func appendTerminal(
+        rootURL: URL,
+        workingDirectory: URL,
+        command: [String]?,
+        shell: String?
+    ) throws -> TerminalSession {
         let terminal = try TerminalSession(
             rootURL: rootURL,
             workingDirectory: workingDirectory,
@@ -491,6 +552,31 @@ final class WorkspaceModel: ObservableObject {
         builtInCodexBody: String? = nil
     ) throws -> TerminalSession {
         let processEnvironment = ProcessInfo.processInfo.environment
+        guard let rootURL else { throw WorkspaceCommandOperationError.noWorkspace }
+        let workingDirectory = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: workingDirectory.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            throw WorkspaceCommandOperationError.invalidTerminalWorkingDirectory(workingDirectory)
+        }
+
+        if let remote = remoteExecutionContext(for: rootURL) {
+            return try appendTerminal(
+                rootURL: rootURL,
+                workingDirectory: workingDirectory,
+                command: Self.remoteShellCommandArguments(
+                    server: remote.source.server,
+                    remoteWorkingDirectory: remote.worktreePath,
+                    shellCommand: shellCommand,
+                    environment: environment,
+                    builtInCodexBody: builtInCodexBody
+                ),
+                shell: nil
+            )
+        }
+
         let command = if let builtInCodexBody {
             Self.codexSessionCommandArguments(
                 commandBody: builtInCodexBody,
@@ -519,6 +605,65 @@ final class WorkspaceModel: ObservableObject {
         ["/usr/bin/env"]
             + environmentAssignments(environment)
             + [resolvedLoginShell(processEnvironment: processEnvironment), "-l", "-c", shellCommand]
+    }
+
+    static func remoteLoginShellCommandArguments(
+        server: String,
+        remoteWorkingDirectory: String
+    ) -> [String] {
+        let script = "cd \(posixSingleQuote(remoteWorkingDirectory)) && exec ${SHELL:-/bin/sh} -l"
+        return sshCommandArguments(server: server, script: script)
+    }
+
+    static func remoteCommandArguments(
+        server: String,
+        remoteWorkingDirectory: String,
+        command: [String]
+    ) -> [String] {
+        let script = "cd \(posixSingleQuote(remoteWorkingDirectory)) && exec "
+            + serializePOSIXShellWords(command)
+        return sshCommandArguments(server: server, script: script)
+    }
+
+    static func remoteShellCommandArguments(
+        server: String,
+        remoteWorkingDirectory: String,
+        shellCommand: String,
+        environment: [String: String],
+        builtInCodexBody: String? = nil
+    ) -> [String] {
+        let script: String
+        if let builtInCodexBody {
+            let child = remoteLoginShellInvocation(
+                shellCommand: builtInCodexBody,
+                environment: environment
+            )
+            let session = ["REPO_ID", "AGENT_PROFILE", "AGENT_NAME"]
+                .map { environment[$0] ?? "" }
+                .joined(separator: ":")
+            let quotedSession = posixSingleQuote(session)
+            let quotedChild = posixSingleQuote(child)
+            script = """
+            cd \(posixSingleQuote(remoteWorkingDirectory)) &&
+            if command -v shpool >/dev/null 2>&1 && [ -f "$HOME/.config/shpool/config.toml" ]; then
+              exec shpool -c "$HOME/.config/shpool/config.toml" attach -f -d "$PWD" -c \(quotedChild) \(quotedSession)
+            fi
+            if command -v shpool >/dev/null 2>&1; then
+              exec shpool attach -f -d "$PWD" -c \(quotedChild) \(quotedSession)
+            fi
+            if command -v atch >/dev/null 2>&1; then
+              exec atch \(quotedSession) \(child)
+            fi
+            exec \(child)
+            """
+        } else {
+            script = "cd \(posixSingleQuote(remoteWorkingDirectory)) && exec "
+                + remoteLoginShellInvocation(
+                    shellCommand: shellCommand,
+                    environment: environment
+                )
+        }
+        return sshCommandArguments(server: server, script: script)
     }
 
     /// Builds the built-in Codex session-manager launcher. The dispatcher is
@@ -571,12 +716,36 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
+    private static func remoteLoginShellInvocation(
+        shellCommand: String,
+        environment: [String: String]
+    ) -> String {
+        let prefix = serializePOSIXShellWords(
+            ["/usr/bin/env"] + environmentAssignments(environment)
+        )
+        return prefix
+            + " \"${SHELL:-/bin/sh}\" -l -c "
+            + posixSingleQuote(shellCommand)
+    }
+
+    private static func sshCommandArguments(server: String, script: String) -> [String] {
+        ["ssh", "-At", server, "/bin/sh -c \(posixSingleQuote(script))"]
+    }
+
     private static func serializePOSIXShellWords(_ words: [String]) -> String {
         words.map(posixSingleQuote).joined(separator: " ")
     }
 
     private static func posixSingleQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func remoteExecutionContext(for rootURL: URL) -> RemoteExecutionContext? {
+        remoteExecutionContexts[Self.canonicalPath(rootURL)]
+    }
+
+    private static func canonicalPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     func close(_ document: EditorDocument) {

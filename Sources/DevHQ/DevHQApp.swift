@@ -40,13 +40,25 @@ struct DevHQApp: App {
             patternMatcher: plugins
         )
         let worktreeService = LibGit2WorktreeService()
+        let remoteRepositoryService = SSHRemoteRepositoryService(
+            mutationProtection: { _, localWorktreeURLs in
+                await MainActor.run {
+                    !localWorktreeURLs.contains {
+                        workspace.hasUnsavedChanges(inWorkspaceAt: $0)
+                    }
+                }
+            }
+        )
         let worktreeExplorer = WorktreeExplorerModel(
             discoverer: worktreeService,
+            remoteService: remoteRepositoryService,
             onActivate: { repository, worktree in
                 workspace.openWorktree(
                     canonicalRepositoryName: repository.canonicalName,
                     worktreeName: worktree.name,
-                    url: worktree.url
+                    url: worktree.url,
+                    remoteSource: repository.remoteSource,
+                    remotePath: worktree.remotePath
                 )
             },
             onSelectionIdentityChange: { repository, worktree in
@@ -55,6 +67,21 @@ struct DevHQApp: App {
                     worktreeName: worktree.name,
                     url: worktree.url
                 )
+            },
+            onWorktreeRemoved: { _, worktree in
+                guard workspace.rootURL == worktree.url.standardizedFileURL.resolvingSymlinksInPath()
+                else { return }
+                if workspace.hasUnsavedChanges(inWorkspaceAt: worktree.url) {
+                    workspace.errorMessage =
+                        "The remote worktree was removed while it still has unsaved editor changes."
+                } else {
+                    workspace.closeWorkspace(at: worktree.url)
+                }
+            },
+            shouldSynchronizeRemoteRepository: { repository in
+                !repository.worktrees.contains {
+                    workspace.hasUnsavedChanges(inWorkspaceAt: $0.url)
+                }
             },
             agentManager: agentManager,
             onActivateAgent: { agent, repository, worktree in

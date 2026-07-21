@@ -14,7 +14,7 @@ enum WorktreeExplorerNodeValue {
     var name: String {
         switch self {
         case .repository(let repository): repository.canonicalName
-        case .worktree(let worktree): worktree.name
+        case .worktree(let worktree): worktree.displayName ?? worktree.name
         case .agent(let agent):
             "\(agent.needsInput ? "! " : "")\(agent.name) [\(agent.profile)]"
         }
@@ -27,6 +27,21 @@ enum WorktreeExplorerNodeValue {
         case .agent(let agent): agent.context.worktreeURL
         }
     }
+
+    var tooltip: String {
+        switch self {
+        case .repository(let repository):
+            guard let source = repository.remoteSource else { return repository.rootURL.path }
+            return "\(source.specification) -> \(repository.rootURL.path)"
+        case .worktree(let worktree):
+            guard let remotePath = worktree.remotePath else { return worktree.url.path }
+            return "\(remotePath) -> \(worktree.url.path)"
+        case .agent(let agent):
+            return agent.context.remoteWorktreePath.map {
+                "\($0) -> \(agent.context.worktreeURL.path)"
+            } ?? agent.context.worktreeURL.path
+        }
+    }
 }
 
 typealias WorktreeNode = TreeNode<WorktreeExplorerNodeID, WorktreeExplorerNodeValue>
@@ -35,11 +50,14 @@ typealias WorktreeNode = TreeNode<WorktreeExplorerNodeID, WorktreeExplorerNodeVa
 final class WorktreeExplorerModel: ObservableObject {
     enum ExplorerError: LocalizedError, Equatable {
         case duplicateRepository(String)
+        case remoteServiceUnavailable
 
         var errorDescription: String? {
             switch self {
             case .duplicateRepository(let name):
                 "\(name) is already in the worktree explorer."
+            case .remoteServiceUnavailable:
+                "SSH remote repositories are unavailable."
             }
         }
     }
@@ -56,9 +74,12 @@ final class WorktreeExplorerModel: ObservableObject {
     }
 
     private let discoverer: any GitWorktreeDiscovering
+    private let remoteService: (any SSHRemoteRepositoryServicing)?
     private let watcherFactory: RepositoryWatcherFactory
     private let onActivate: (GitRepositoryInfo, GitWorktreeInfo) -> Void
     private let onSelectionIdentityChange: (GitRepositoryInfo, GitWorktreeInfo) -> Void
+    private let onWorktreeRemoved: (GitRepositoryInfo, GitWorktreeInfo) -> Void
+    private let shouldSynchronizeRemoteRepository: (GitRepositoryInfo) -> Bool
     private let eventDelivery: (@escaping () -> Void) -> Void
     private let stateStore: (any WorkspaceStatePersisting)?
     private let agentManager: AgentManager?
@@ -69,8 +90,11 @@ final class WorktreeExplorerModel: ObservableObject {
 
     init(
         discoverer: any GitWorktreeDiscovering,
+        remoteService: (any SSHRemoteRepositoryServicing)? = nil,
         onActivate: @escaping (GitRepositoryInfo, GitWorktreeInfo) -> Void,
         onSelectionIdentityChange: @escaping (GitRepositoryInfo, GitWorktreeInfo) -> Void = { _, _ in },
+        onWorktreeRemoved: @escaping (GitRepositoryInfo, GitWorktreeInfo) -> Void = { _, _ in },
+        shouldSynchronizeRemoteRepository: @escaping (GitRepositoryInfo) -> Bool = { _ in true },
         agentManager: AgentManager? = nil,
         onActivateAgent: @escaping (
             AgentRecord,
@@ -86,8 +110,11 @@ final class WorktreeExplorerModel: ObservableObject {
         }
     ) {
         self.discoverer = discoverer
+        self.remoteService = remoteService
         self.onActivate = onActivate
         self.onSelectionIdentityChange = onSelectionIdentityChange
+        self.onWorktreeRemoved = onWorktreeRemoved
+        self.shouldSynchronizeRemoteRepository = shouldSynchronizeRemoteRepository
         self.agentManager = agentManager
         self.onActivateAgent = onActivateAgent
         self.stateStore = stateStore
@@ -101,8 +128,11 @@ final class WorktreeExplorerModel: ObservableObject {
 
     convenience init(
         discoverer: any GitWorktreeDiscovering,
+        remoteService: (any SSHRemoteRepositoryServicing)? = nil,
         onActivate: @escaping (GitWorktreeInfo) -> Void,
         onSelectionIdentityChange: @escaping (GitRepositoryInfo, GitWorktreeInfo) -> Void = { _, _ in },
+        onWorktreeRemoved: @escaping (GitRepositoryInfo, GitWorktreeInfo) -> Void = { _, _ in },
+        shouldSynchronizeRemoteRepository: @escaping (GitRepositoryInfo) -> Bool = { _ in true },
         agentManager: AgentManager? = nil,
         onActivateAgent: @escaping (
             AgentRecord,
@@ -119,8 +149,11 @@ final class WorktreeExplorerModel: ObservableObject {
     ) {
         self.init(
             discoverer: discoverer,
+            remoteService: remoteService,
             onActivate: { _, worktree in onActivate(worktree) },
             onSelectionIdentityChange: onSelectionIdentityChange,
+            onWorktreeRemoved: onWorktreeRemoved,
+            shouldSynchronizeRemoteRepository: shouldSynchronizeRemoteRepository,
             agentManager: agentManager,
             onActivateAgent: onActivateAgent,
             stateStore: stateStore,
@@ -163,6 +196,116 @@ final class WorktreeExplorerModel: ObservableObject {
         errorMessage = nil
         rebuildTree()
         persistRepositories()
+    }
+
+    /// Registers an SSH repository before doing any network work, then
+    /// replaces its cached metadata only after a complete synchronization.
+    func addRemoteRepository(_ specification: String) async throws {
+        guard let remoteService else {
+            let error = ExplorerError.remoteServiceUnavailable
+            errorMessage = error.localizedDescription
+            throw error
+        }
+
+        let source: SSHRemoteRepositorySource
+        do {
+            source = try remoteService.parseSource(specification)
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+        guard !repositories.contains(where: {
+            $0.remoteSource?.server == source.server
+                && $0.remoteSource?.remotePath == source.remotePath
+        }) else {
+            let error = ExplorerError.duplicateRepository(source.remotePath)
+            errorMessage = error.localizedDescription
+            throw error
+        }
+
+        let mirrorURL = remoteService.mirrorPath(for: source)
+        let repositoryName = remoteRepositoryName(source.remotePath)
+        let placeholder = GitRepositoryInfo(
+            rootURL: mirrorURL,
+            name: repositoryName,
+            canonicalName: allocateCanonicalName(base: repositoryName),
+            gitDirectoryURL: mirrorURL.appendingPathComponent(".git", isDirectory: true),
+            worktrees: [],
+            remoteSource: source
+        )
+        repositories.append(placeholder)
+        errorMessage = nil
+        rebuildTree()
+        persistRepositories()
+
+        do {
+            try await synchronizeRemoteRepository(source: source)
+        } catch {
+            throw error
+        }
+    }
+
+    /// Synchronizes each remote independently. One failed host does not block
+    /// successful metadata updates from other hosts.
+    func synchronizeRemoteRepositories() async {
+        let remoteRepositories = repositories.filter(\.isRemote)
+        var sources: [(SSHRemoteRepositorySource, SSHRemoteSynchronizationContext)] = []
+        var skippedSources: [SSHRemoteRepositorySource] = []
+        for repository in remoteRepositories {
+            guard let source = repository.remoteSource else { continue }
+            if shouldSynchronizeRemoteRepository(repository) {
+                sources.append((source, synchronizationContext(for: repository)))
+            } else {
+                skippedSources.append(source)
+            }
+        }
+        var failures: [String] = []
+        var cleanupWarnings: [String] = []
+        await withTaskGroup(of: (SSHRemoteRepositorySource, Result<SSHRemoteRepositorySnapshot, Error>).self) { group in
+            for (source, context) in sources {
+                guard let remoteService else { continue }
+                group.addTask {
+                    do {
+                        return (
+                            source,
+                            .success(try await remoteService.synchronize(source, context: context))
+                        )
+                    } catch {
+                        return (source, .failure(error))
+                    }
+                }
+            }
+            for await (source, result) in group {
+                applyRemoteSynchronization(result, source: source)
+                if case .failure(let error) = result {
+                    failures.append("\(source.specification): \(error.localizedDescription)")
+                } else if case .success(let snapshot) = result {
+                    cleanupWarnings.append(contentsOf: snapshot.cleanupWarnings.map {
+                        "\(source.specification): \($0)"
+                    })
+                }
+            }
+        }
+        var notices: [String] = []
+        if !failures.isEmpty {
+            notices.append("Could not sync remote repositories: " + failures.sorted().joined(separator: "; "))
+        }
+        if !skippedSources.isEmpty {
+            notices.append(
+                "Skipped remote synchronization for "
+                    + skippedSources.map(\.specification).sorted().joined(separator: ", ")
+                    + " because of unsaved editor changes."
+            )
+        }
+        if !cleanupWarnings.isEmpty {
+            notices.append(
+                "Remote synchronization completed with cleanup warnings: "
+                    + cleanupWarnings.sorted().joined(separator: "; ")
+            )
+        }
+        if !notices.isEmpty {
+            errorMessage = notices.joined(separator: " ")
+        }
     }
 
     func removeRepository(id: String) {
@@ -250,13 +393,14 @@ final class WorktreeExplorerModel: ObservableObject {
 
     func refreshAll() {
         var refreshedAny = false
-        for id in repositories.map(\.id) {
+        for id in repositories.filter({ !$0.isRemote }).map(\.id) {
             refreshedAny = refreshRepository(id: id, shouldPersist: false) || refreshedAny
         }
         if refreshedAny { persistRepositories() }
     }
 
     func refreshRepository(id: String) {
+        guard repositories.first(where: { $0.id == id })?.remoteSource == nil else { return }
         _ = refreshRepository(id: id, shouldPersist: true)
     }
 
@@ -299,6 +443,7 @@ final class WorktreeExplorerModel: ObservableObject {
         var savedWorktreesByPath: [String: PersistedWorktreeState] = [:]
         var selectedPath: String?
         var restorationError: Error?
+        var restoredRemoteError: String?
         var validRepositoryIDs = Set<String>()
 
         for savedRepository in savedRepositories {
@@ -317,6 +462,27 @@ final class WorktreeExplorerModel: ObservableObject {
                 selectedPath = savedRepository.worktrees
                     .first(where: \.isSelected)
                     .map(\.path)
+            }
+
+            if let server = savedRepository.server,
+               let remotePath = savedRepository.remotePath,
+               let source = try? SSHRemoteRepositorySource(
+                   server: server,
+                   remotePath: remotePath
+               ) {
+                let remote = staleRepository(
+                    from: savedRepository,
+                    remoteSource: source
+                )
+                repositories.append(remote)
+                restoreAgents(in: remote, savedWorktreesByPath: savedWorktreesByPath)
+                if restoredRemoteError == nil, let lastError = savedRepository.lastSyncError {
+                    restoredRemoteError = "Could not sync remote repository \(source.specification): \(lastError)"
+                }
+                if FileManager.default.fileExists(atPath: remote.gitDirectoryURL.path) {
+                    validRepositoryIDs.insert(remote.id)
+                }
+                continue
             }
 
             do {
@@ -357,7 +523,7 @@ final class WorktreeExplorerModel: ObservableObject {
         var expandedIDs = Set<WorktreeExplorerNodeID>()
         for repository in repositories {
             if expansionByRootPath[canonicalPath(repository.rootURL)] == true {
-                expandedIDs.insert(.repository(repository.id))
+                expandedIDs.insert(visualRootID(for: repository))
             }
             for worktree in repository.worktrees
                 where expansionByWorktreePath[canonicalPath(worktree.url)] == true {
@@ -377,7 +543,7 @@ final class WorktreeExplorerModel: ObservableObject {
             }.first
         }
         selectedWorktreeID = selectedIdentity?.worktree.id
-        errorMessage = restorationError?.localizedDescription
+        errorMessage = restorationError?.localizedDescription ?? restoredRemoteError
         isRestoring = false
         persistRepositories()
 
@@ -463,11 +629,17 @@ final class WorktreeExplorerModel: ObservableObject {
     private func rebuildTree() {
         let previousRootIDs = Set(tree.roots.map(\.id))
         let previouslyExpandedIDs = tree.expandedIDs
-        let roots = repositories.map { repository in
-            WorktreeNode(
+        let roots = repositoryGroups().map { group in
+            let repository = group.first(where: { !$0.isRemote }) ?? group[0]
+            let hasLocalAndRemoteSources = group.contains(where: { !$0.isRemote })
+                && group.contains(where: \.isRemote)
+            let displayRepository = hasLocalAndRemoteSources
+                ? repository.withCanonicalName(repository.name)
+                : repository
+            return WorktreeNode(
                 id: .repository(repository.id),
-                value: .repository(repository),
-                children: repository.worktrees.map { worktree in
+                value: .repository(displayRepository),
+                children: group.flatMap(\.worktrees).map { worktree in
                     let agents = agentManager?.records(for: worktree.url) ?? []
                     return WorktreeNode(
                         id: .worktree(worktree.id),
@@ -491,6 +663,34 @@ final class WorktreeExplorerModel: ObservableObject {
         tree.restoreExpandedIDs(expandedIDs)
     }
 
+    private func repositoryGroups() -> [[GitRepositoryInfo]] {
+        var groups: [[GitRepositoryInfo]] = []
+        for repository in repositories {
+            // Preserve separate roots for two local repositories that happen
+            // to share a basename. SSH sources join the first matching group,
+            // which gives local + remote repositories the requested shared
+            // visual root without changing existing local-only behavior.
+            let index = groups.firstIndex { group in
+                guard group.first?.name == repository.name else { return false }
+                return repository.isRemote || !group.contains(where: { !$0.isRemote })
+            }
+            if let index {
+                groups[index].append(repository)
+            } else {
+                groups.append([repository])
+            }
+        }
+        return groups
+    }
+
+    private func visualRootID(for repository: GitRepositoryInfo) -> WorktreeExplorerNodeID {
+        let group = repositoryGroups().first(where: { group in
+            group.contains(where: { $0.id == repository.id })
+        }) ?? [repository]
+        let representative = group.first(where: { !$0.isRemote }) ?? group[0]
+        return .repository(representative.id)
+    }
+
     private func canonicalPath(_ url: URL) -> String {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
@@ -498,7 +698,7 @@ final class WorktreeExplorerModel: ObservableObject {
     private func persistRepositories() {
         guard let stateStore else { return }
         let state = repositories.map { repository in
-            let repositoryNodeID = WorktreeExplorerNodeID.repository(repository.id)
+            let repositoryNodeID = visualRootID(for: repository)
             return PersistedRepositoryState(
                 canonicalName: repository.canonicalName,
                 rootPath: canonicalPath(repository.rootURL),
@@ -511,9 +711,13 @@ final class WorktreeExplorerModel: ObservableObject {
                         isMain: worktree.isMain,
                         isExpanded: tree.expandedIDs.contains(.worktree(worktree.id)),
                         isSelected: worktree.id == selectedWorktreeID,
-                        agents: agentManager?.persistedAgents(for: worktree.url) ?? []
+                        agents: agentManager?.persistedAgents(for: worktree.url) ?? [],
+                        remotePath: worktree.remotePath
                     )
-                }
+                },
+                server: repository.remoteSource?.server,
+                remotePath: repository.remoteSource?.remotePath,
+                lastSyncError: repository.lastSyncError
             )
         }
         guard state != lastPersistedRepositories else { return }
@@ -573,8 +777,133 @@ final class WorktreeExplorerModel: ObservableObject {
         persistRepositories()
     }
 
+    private func synchronizeRemoteRepository(
+        source: SSHRemoteRepositorySource
+    ) async throws {
+        guard let repository = repositories.first(where: { $0.remoteSource == source }),
+              shouldSynchronizeRemoteRepository(repository)
+        else { return }
+        guard let remoteService else {
+            let error = ExplorerError.remoteServiceUnavailable
+            applyRemoteSynchronization(.failure(error), source: source)
+            throw error
+        }
+        do {
+            let snapshot = try await remoteService.synchronize(
+                source,
+                context: synchronizationContext(for: repository)
+            )
+            applyRemoteSynchronization(.success(snapshot), source: source)
+        } catch {
+            applyRemoteSynchronization(.failure(error), source: source)
+            throw error
+        }
+    }
+
+    private func synchronizationContext(
+        for repository: GitRepositoryInfo
+    ) -> SSHRemoteSynchronizationContext {
+        SSHRemoteSynchronizationContext(
+            allowExistingCloneReferenceReuse: repository.worktrees.isEmpty
+        )
+    }
+
+    private func applyRemoteSynchronization(
+        _ result: Result<SSHRemoteRepositorySnapshot, Error>,
+        source: SSHRemoteRepositorySource
+    ) {
+        guard let index = repositories.firstIndex(where: { $0.remoteSource == source }) else {
+            return
+        }
+        let previous = repositories[index]
+        switch result {
+        case .success(let snapshot):
+            let cleanupWarning = snapshot.cleanupWarnings.isEmpty
+                ? nil
+                : snapshot.cleanupWarnings.joined(separator: "; ")
+            let refreshed = GitRepositoryInfo(
+                rootURL: snapshot.rootURL,
+                name: source.repositoryName,
+                canonicalName: previous.canonicalName,
+                gitDirectoryURL: snapshot.gitDirectoryURL,
+                worktrees: snapshot.worktrees.map { worktree in
+                    GitWorktreeInfo(
+                        name: worktree.name,
+                        url: worktree.localURL,
+                        isMain: worktree.isMain,
+                        remotePath: worktree.remotePath,
+                        displayName: "[\(source.server)] \(worktree.name)"
+                    )
+                },
+                remoteSource: source,
+                lastSyncError: cleanupWarning
+            )
+            repositories[index] = refreshed
+            watchers.removeValue(forKey: previous.id)?.cancel()
+            errorMessage = cleanupWarning.map {
+                "Remote synchronization completed with cleanup warnings: "
+                    + "\(source.specification): \($0)"
+            }
+            restoreRemoteAgents(from: previous, into: refreshed)
+            reconcileSelection(previous: previous, refreshed: refreshed)
+
+        case .failure(let error):
+            repositories[index] = GitRepositoryInfo(
+                rootURL: previous.rootURL,
+                name: previous.name,
+                canonicalName: previous.canonicalName,
+                gitDirectoryURL: previous.gitDirectoryURL,
+                worktrees: previous.worktrees,
+                remoteSource: source,
+                lastSyncError: error.localizedDescription
+            )
+            errorMessage = error.localizedDescription
+        }
+        rebuildTree()
+        persistRepositories()
+    }
+
+    private func restoreRemoteAgents(
+        from previous: GitRepositoryInfo,
+        into refreshed: GitRepositoryInfo
+    ) {
+        let previousPaths = Set(previous.worktrees.map { canonicalPath($0.url) })
+        let refreshedPaths = Set(refreshed.worktrees.map { canonicalPath($0.url) })
+        for removedPath in previousPaths.subtracting(refreshedPaths) {
+            agentManager?.removeAgents(inWorktree: URL(fileURLWithPath: removedPath))
+        }
+        for worktree in refreshed.worktrees {
+            let states = agentManager?.persistedAgents(for: worktree.url) ?? []
+            agentManager?.restore(states, repository: refreshed, worktree: worktree)
+        }
+    }
+
+    private func reconcileSelection(
+        previous: GitRepositoryInfo,
+        refreshed: GitRepositoryInfo
+    ) {
+        guard let selectedWorktreeID,
+              previous.worktrees.contains(where: { $0.id == selectedWorktreeID })
+        else { return }
+        if let selected = refreshed.worktrees.first(where: { $0.id == selectedWorktreeID }) {
+            onSelectionIdentityChange(refreshed, selected)
+        } else {
+            if let removed = previous.worktrees.first(where: { $0.id == selectedWorktreeID }) {
+                onWorktreeRemoved(previous, removed)
+            }
+            self.selectedWorktreeID = nil
+            selectedAgentID = nil
+        }
+    }
+
+    private func remoteRepositoryName(_ remotePath: String) -> String {
+        let name = URL(fileURLWithPath: remotePath).lastPathComponent
+        return name.isEmpty ? "repo" : name
+    }
+
     private func staleRepository(
-        from state: PersistedRepositoryState
+        from state: PersistedRepositoryState,
+        remoteSource: SSHRemoteRepositorySource? = nil
     ) -> GitRepositoryInfo {
         let rootURL = URL(fileURLWithPath: state.rootPath, isDirectory: true)
         return GitRepositoryInfo(
@@ -589,9 +918,15 @@ final class WorktreeExplorerModel: ObservableObject {
                 GitWorktreeInfo(
                     name: worktree.branchName,
                     url: URL(fileURLWithPath: worktree.path, isDirectory: true),
-                    isMain: worktree.isMain
+                    isMain: worktree.isMain,
+                    remotePath: worktree.remotePath,
+                    displayName: remoteSource.map {
+                        "[\($0.server)] \(worktree.branchName)"
+                    }
                 )
-            }
+            },
+            remoteSource: remoteSource,
+            lastSyncError: state.lastSyncError
         )
     }
 
@@ -599,6 +934,10 @@ final class WorktreeExplorerModel: ObservableObject {
         let base = repository.rootURL.lastPathComponent.isEmpty
             ? repository.name
             : repository.rootURL.lastPathComponent
+        return allocateCanonicalName(base: base)
+    }
+
+    private func allocateCanonicalName(base: String) -> String {
         let usedNames = Set(repositories.map { $0.canonicalName.lowercased() })
         guard usedNames.contains(base.lowercased()) else { return base }
 

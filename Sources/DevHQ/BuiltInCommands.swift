@@ -3,8 +3,21 @@ import Foundation
 
 struct BuiltInCommandPickers {
     var repositoryURL: () -> URL?
+    var remoteRepositorySpec: () -> String?
     var fileURL: (_ workspaceRoot: URL) -> URL?
     var directoryURL: (_ workspaceRoot: URL) -> URL?
+
+    init(
+        repositoryURL: @escaping () -> URL?,
+        remoteRepositorySpec: @escaping () -> String? = { nil },
+        fileURL: @escaping (_ workspaceRoot: URL) -> URL?,
+        directoryURL: @escaping (_ workspaceRoot: URL) -> URL?
+    ) {
+        self.repositoryURL = repositoryURL
+        self.remoteRepositorySpec = remoteRepositorySpec
+        self.fileURL = fileURL
+        self.directoryURL = directoryURL
+    }
 
     static let appKit = BuiltInCommandPickers(
         repositoryURL: {
@@ -15,6 +28,22 @@ struct BuiltInCommandPickers {
             panel.canChooseFiles = false
             panel.allowsMultipleSelection = false
             return panel.runModal() == .OK ? panel.url : nil
+        },
+        remoteRepositorySpec: {
+            let specField = NSTextField(string: "")
+            specField.placeholderString = "server:/path/to/repo"
+            specField.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+
+            let alert = NSAlert()
+            alert.messageText = "Open Remote Repository"
+            alert.informativeText = "Enter an SSH repository as server:/path/to/repo."
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            alert.accessoryView = specField
+            alert.window.initialFirstResponder = specField
+
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+            return specField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         },
         fileURL: { workspaceRoot in
             let panel = NSSavePanel()
@@ -59,6 +88,25 @@ func registerBuiltInCommands(
             throw error
         }
         worktreeExplorer.syncSelection(with: workspace.rootURL)
+    }
+
+    try commandManager.add(
+        id: "devhq:open-remote-repo",
+        viewKinds: Set(CommandViewKind.allCases)
+    ) { _ in
+        guard let spec = pickers.remoteRepositorySpec() else { return }
+        Task {
+            try? await worktreeExplorer.addRemoteRepository(spec)
+        }
+    }
+
+    try commandManager.add(
+        id: "devhq:sync-remote-repos",
+        viewKinds: Set(CommandViewKind.allCases)
+    ) { _ in
+        Task {
+            await worktreeExplorer.synchronizeRemoteRepositories()
+        }
     }
 
     let workspaceAvailable: RegisteredCommand.Predicate = { _ in

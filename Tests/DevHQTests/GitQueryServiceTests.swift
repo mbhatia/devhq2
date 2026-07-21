@@ -79,6 +79,157 @@ final class GitQueryServiceTests: XCTestCase {
         XCTAssertEqual(mergeBase, fixture.baseCommit)
     }
 
+    func testConfiguredUpstreamPrecedesStoredMirrorParent() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        try git(["checkout", "-b", "develop"], in: fixture.repository)
+        try "develop\n".write(
+            to: fixture.repository.appendingPathComponent("develop.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "develop.txt"], in: fixture.repository)
+        try commit("develop", in: fixture.repository)
+        let developCommit = try gitOutput(["rev-parse", "HEAD"], in: fixture.repository)
+        try git(["checkout", "-b", "feature"], in: fixture.repository)
+        try "feature\n".write(
+            to: fixture.repository.appendingPathComponent("feature.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "feature.txt"], in: fixture.repository)
+        try commit("feature", in: fixture.repository)
+        try git(["branch", "--set-upstream-to=develop", "feature"], in: fixture.repository)
+        try writeStoredParent(fixture.baseCommit, in: fixture.repository)
+
+        let snapshot = try await GitQueryService().changes(
+            in: fixture.repository,
+            mode: .head,
+            forceRefresh: true
+        )
+
+        XCTAssertEqual(snapshot.changes.map(\.path), ["feature.txt"])
+        XCTAssertEqual(
+            snapshot.parentState,
+            .resolved(reference: "develop", mergeBase: developCommit)
+        )
+    }
+
+    func testDetachedShallowMirrorUsesStoredParentForFiltersContentAndDiff() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        try git(["checkout", "-b", "feature"], in: fixture.repository)
+        try "base\nfeature\n".write(
+            to: fixture.repository.appendingPathComponent("base.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "base.txt"], in: fixture.repository)
+        try commit("feature", in: fixture.repository)
+
+        let mirror = fixture.container.appendingPathComponent("mirror", isDirectory: true)
+        try gitRaw([
+            "clone", "--depth", "2", "--no-tags", "--branch", "feature",
+            "file://\(fixture.repository.path)", mirror.path,
+        ])
+        try git(["checkout", "--detach"], in: mirror)
+        try git(["branch", "-D", "feature"], in: mirror)
+        try writeStoredParent(fixture.baseCommit, in: mirror)
+        XCTAssertEqual(try gitOutput(["rev-parse", "--is-shallow-repository"], in: mirror), "true")
+
+        let service = GitQueryService()
+        let snapshot = try await service.changes(in: mirror, mode: .head, forceRefresh: true)
+        let original = try await service.fileContent(in: mirror, path: "base.txt", mode: .head)
+        let request = GitDiffRequest(
+            repositoryURL: mirror,
+            filePath: "base.txt",
+            mode: .head,
+            contextID: "detached-mirror"
+        )
+        let diff = try await service.diff(request)
+
+        XCTAssertEqual(snapshot.changes.map(\.path), ["base.txt"])
+        XCTAssertEqual(
+            snapshot.parentState,
+            .resolved(reference: fixture.baseCommit, mergeBase: fixture.baseCommit)
+        )
+        XCTAssertEqual(String(decoding: original, as: UTF8.self), "base\n")
+        XCTAssertEqual(diff.contextID, request.contextID)
+        XCTAssertFalse(diff.hunks.isEmpty)
+        XCTAssertEqual(diff.parentState, snapshot.parentState)
+    }
+
+    func testDevelopIsAConventionalParentFallback() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        try git(["checkout", "-b", "develop"], in: fixture.repository)
+        try "develop\n".write(
+            to: fixture.repository.appendingPathComponent("develop.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "develop.txt"], in: fixture.repository)
+        try commit("develop", in: fixture.repository)
+        let developCommit = try gitOutput(["rev-parse", "HEAD"], in: fixture.repository)
+        try git(["checkout", "-b", "feature"], in: fixture.repository)
+        try "feature\n".write(
+            to: fixture.repository.appendingPathComponent("feature.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "feature.txt"], in: fixture.repository)
+        try commit("feature", in: fixture.repository)
+        try git(["branch", "-D", "main"], in: fixture.repository)
+
+        let snapshot = try await GitQueryService().changes(
+            in: fixture.repository,
+            mode: .head,
+            forceRefresh: true
+        )
+
+        XCTAssertEqual(snapshot.changes.map(\.path), ["feature.txt"])
+        XCTAssertEqual(
+            snapshot.parentState,
+            .resolved(reference: "develop", mergeBase: developCommit)
+        )
+    }
+
+    func testRequestMirrorParentPrecedesStoredMirrorParent() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        try git(["checkout", "-b", "feature"], in: fixture.repository)
+        try "first\n".write(
+            to: fixture.repository.appendingPathComponent("first.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "first.txt"], in: fixture.repository)
+        try commit("first", in: fixture.repository)
+        let storedParent = try gitOutput(["rev-parse", "HEAD"], in: fixture.repository)
+        try "second\n".write(
+            to: fixture.repository.appendingPathComponent("second.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "second.txt"], in: fixture.repository)
+        try commit("second", in: fixture.repository)
+        try git(["checkout", "--detach"], in: fixture.repository)
+        try writeStoredParent(storedParent, in: fixture.repository)
+
+        let result = try await GitQueryService().diff(GitDiffRequest(
+            repositoryURL: fixture.repository,
+            filePath: "first.txt",
+            mode: .head,
+            mirrorParent: fixture.baseCommit
+        ))
+
+        XCTAssertEqual(
+            result.parentState,
+            .resolved(reference: fixture.baseCommit, mergeBase: fixture.baseCommit)
+        )
+        XCTAssertFalse(result.hunks.isEmpty)
+    }
+
     func testStagedRenameRetainsOldAndNewPaths() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.container) }
@@ -293,6 +444,18 @@ final class GitQueryServiceTests: XCTestCase {
 
     private func commit(_ message: String, in repository: URL) throws {
         try git(["commit", "-m", message, "--no-gpg-sign"], in: repository)
+    }
+
+    private func writeStoredParent(_ parent: String, in repository: URL) throws {
+        let gitDirectory = try gitOutput(
+            ["rev-parse", "--path-format=absolute", "--git-dir"],
+            in: repository
+        )
+        try "\(parent)\n".write(
+            to: URL(fileURLWithPath: gitDirectory).appendingPathComponent("devhq-parent-ref"),
+            atomically: true,
+            encoding: .utf8
+        )
     }
 
     private func git(_ arguments: [String], in repository: URL) throws {

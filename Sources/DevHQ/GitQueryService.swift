@@ -234,26 +234,13 @@ public actor GitQueryService: GitQuerying {
         var candidates: [String] = []
         if let preferred, !preferred.isEmpty { candidates.append(preferred) }
 
-        // `mirror` remains in the request model for future compatibility. There
-        // is no mirror parent provider in the current product.
-        _ = mirror
-
-        if let remoteHead = try? runGit(
-            ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        if let upstream = try? runGit(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
             in: repositoryURL
         ).string.trimmingCharacters(in: .whitespacesAndNewlines),
-           !remoteHead.isEmpty {
-            candidates.append(remoteHead)
+           !upstream.isEmpty {
+            candidates.append(upstream)
         }
-
-        candidates += ["origin/main", "origin/master"]
-        if let remotes = try? runGit(["remote"], in: repositoryURL).string {
-            for remote in remotes.split(whereSeparator: \.isWhitespace).map(String.init) where remote != "origin" {
-                candidates.append("\(remote)/main")
-                candidates.append("\(remote)/master")
-            }
-        }
-        candidates += ["main", "master"]
 
         var seen = Set<String>()
         for candidate in candidates where seen.insert(candidate).inserted {
@@ -263,7 +250,59 @@ public actor GitQueryService: GitQuerying {
                   !base.isEmpty else { continue }
             return .resolved(reference: candidate, mergeBase: base)
         }
+
+        // Managed mirrors are detached, so they cannot expose an upstream via
+        // branch configuration. Their synchronizer supplies the already
+        // resolved merge base either on the request or in the worktree gitdir.
+        for mirrorParent in [mirror, storedMirrorParent(in: repositoryURL)].compactMap({ $0 }) {
+            guard referenceExists(mirrorParent, in: repositoryURL) else { continue }
+            return .resolved(reference: mirrorParent, mergeBase: mirrorParent)
+        }
+
+        candidates.removeAll(keepingCapacity: true)
+
+        if let remoteHead = try? runGit(
+            ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+            in: repositoryURL
+        ).string.trimmingCharacters(in: .whitespacesAndNewlines),
+           !remoteHead.isEmpty {
+            candidates.append(remoteHead)
+        }
+
+        candidates += ["origin/main", "origin/develop", "origin/master"]
+        if let remotes = try? runGit(["remote"], in: repositoryURL).string {
+            for remote in remotes.split(whereSeparator: \.isWhitespace).map(String.init) where remote != "origin" {
+                candidates.append("\(remote)/main")
+                candidates.append("\(remote)/develop")
+                candidates.append("\(remote)/master")
+            }
+        }
+        candidates += ["main", "develop", "master"]
+
+        for candidate in candidates where seen.insert(candidate).inserted {
+            guard referenceExists(candidate, in: repositoryURL) else { continue }
+            guard let base = try? runGit(["merge-base", candidate, "HEAD"], in: repositoryURL)
+                .string.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !base.isEmpty else { continue }
+            return .resolved(reference: candidate, mergeBase: base)
+        }
         return .noParent(message: "No parent branch is available for this branch.")
+    }
+
+    private static func storedMirrorParent(in repositoryURL: URL) -> String? {
+        guard let gitDirectory = try? runGit(
+            ["rev-parse", "--path-format=absolute", "--git-dir"],
+            in: repositoryURL
+        ).string.trimmingCharacters(in: .whitespacesAndNewlines),
+              !gitDirectory.isEmpty else { return nil }
+
+        let parentFile = URL(fileURLWithPath: gitDirectory, isDirectory: true)
+            .appendingPathComponent("devhq-parent-ref", isDirectory: false)
+        guard let contents = try? String(contentsOf: parentFile, encoding: .utf8) else { return nil }
+        let parent = contents.split(whereSeparator: \.isNewline).first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return parent.isEmpty ? nil : parent
     }
 
     private static func referenceExists(_ reference: String, in repositoryURL: URL) -> Bool {

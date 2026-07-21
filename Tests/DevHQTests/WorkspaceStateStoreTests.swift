@@ -68,6 +68,49 @@ final class WorkspaceStateStoreTests: XCTestCase {
         XCTAssertEqual(try store.loadRepositories(), repositories)
     }
 
+    func testRemoteRepositoryMetadataRoundTrips() throws {
+        let repository = PersistedRepositoryState(
+            canonicalName: "devhq",
+            rootPath: "/cache/devhq",
+            gitDirectoryPath: "/cache/devhq/.git",
+            isExpanded: true,
+            worktrees: [
+                PersistedWorktreeState(
+                    branchName: "main",
+                    path: "/cache/devhq",
+                    isMain: true,
+                    isExpanded: false,
+                    isSelected: true,
+                    remotePath: "/srv/devhq"
+                )
+            ],
+            server: "build.example.com",
+            remotePath: "/srv/devhq",
+            lastSyncError: "connection closed"
+        )
+
+        try store.saveRepositories([repository])
+
+        XCTAssertEqual(try store.loadRepositories(), [repository])
+    }
+
+    func testLegacyRepositoryJSONDecodesWithoutRemoteMetadata() throws {
+        try FileManager.default.createDirectory(
+            at: configDirectory,
+            withIntermediateDirectories: true
+        )
+        let legacyJSON = #"{"canonicalName":"devhq","rootPath":"/repos/devhq","gitDirectoryPath":"/repos/devhq/.git","isExpanded":true,"worktrees":[{"branchName":"main","path":"/repos/devhq","isMain":true,"isExpanded":false,"isSelected":true}]}"#
+        try Data((legacyJSON + "\n").utf8).write(to: store.repositoriesFileURL)
+
+        let repositories = try store.loadRepositories()
+
+        XCTAssertEqual(repositories.count, 1)
+        XCTAssertNil(repositories[0].server)
+        XCTAssertNil(repositories[0].remotePath)
+        XCTAssertNil(repositories[0].lastSyncError)
+        XCTAssertNil(repositories[0].worktrees[0].remotePath)
+    }
+
     func testEmptyRepositoriesCreateAnEmptyFileAndLoadAsEmpty() throws {
         try store.saveRepositories([])
 

@@ -16,12 +16,21 @@ final class BuiltInCommandsTests: XCTestCase {
         )
 
         XCTAssertEqual(Set(manager.commandsByID.keys), [
+            "devhq:open-remote-repo", "devhq:sync-remote-repos",
             "worktree:add-repo", "file:new", "file:new-dir", "file:close",
             "terminal:new", "terminal:close", "agent:create", "git:toggle-diff",
             "git:filter-full", "git:filter-uncommitted", "git:filter-staged",
             "git:filter-head"
         ])
         XCTAssertEqual(manager.commandsByID["agent:create"]?.title, "agent: create")
+        XCTAssertEqual(
+            manager.commandsByID["devhq:open-remote-repo"]?.title,
+            "devhq: open remote repo"
+        )
+        XCTAssertEqual(
+            manager.commandsByID["devhq:sync-remote-repos"]?.title,
+            "devhq: sync remote repos"
+        )
         XCTAssertEqual(manager.commandsByID["worktree:add-repo"]?.title, "worktree: add repo")
         XCTAssertEqual(manager.commandsByID["file:new"]?.title, "file: new")
         XCTAssertEqual(manager.commandsByID["file:new-dir"]?.title, "file: new dir")
@@ -32,6 +41,14 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(manager.commandsByID["git:toggle-diff"]?.title, "git: toggle diff")
         XCTAssertEqual(
             manager.commandsByID["worktree:add-repo"]?.viewKinds,
+            Set(CommandViewKind.allCases)
+        )
+        XCTAssertEqual(
+            manager.commandsByID["devhq:open-remote-repo"]?.viewKinds,
+            Set(CommandViewKind.allCases)
+        )
+        XCTAssertEqual(
+            manager.commandsByID["devhq:sync-remote-repos"]?.viewKinds,
             Set(CommandViewKind.allCases)
         )
         XCTAssertEqual(manager.commandsByID["file:new"]?.viewKinds, [.file, .document])
@@ -52,7 +69,7 @@ final class BuiltInCommandsTests: XCTestCase {
         for view in CommandViewKind.allCases {
             XCTAssertEqual(
                 try manager.commands(in: CommandContext(view: view)).map(\.id),
-                ["worktree:add-repo"]
+                ["devhq:open-remote-repo", "devhq:sync-remote-repos", "worktree:add-repo"]
             )
         }
 
@@ -62,7 +79,8 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .file)).map(\.id),
             [
-                "file:new", "file:new-dir", "git:filter-full", "git:filter-head",
+                "devhq:open-remote-repo", "devhq:sync-remote-repos", "file:new",
+                "file:new-dir", "git:filter-full", "git:filter-head",
                 "git:filter-staged", "git:filter-uncommitted", "git:toggle-diff",
                 "terminal:new", "worktree:add-repo"
             ]
@@ -70,7 +88,8 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .document)).map(\.id),
             [
-                "file:new", "file:new-dir", "git:filter-full", "git:filter-head",
+                "devhq:open-remote-repo", "devhq:sync-remote-repos", "file:new",
+                "file:new-dir", "git:filter-full", "git:filter-head",
                 "git:filter-staged", "git:filter-uncommitted", "git:toggle-diff",
                 "terminal:new", "worktree:add-repo"
             ]
@@ -82,7 +101,8 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .document)).map(\.id),
             [
-                "file:close", "file:new", "file:new-dir", "git:filter-full",
+                "devhq:open-remote-repo", "devhq:sync-remote-repos", "file:close",
+                "file:new", "file:new-dir", "git:filter-full",
                 "git:filter-head", "git:filter-staged", "git:filter-uncommitted",
                 "git:toggle-diff", "terminal:new", "worktree:add-repo"
             ]
@@ -115,6 +135,7 @@ final class BuiltInCommandsTests: XCTestCase {
                 repositoryPickerCalls += 1
                 return root
             },
+            remoteRepositorySpec: { nil },
             fileURL: { pickerRoot in
                 filePickerRoots.append(pickerRoot)
                 return newFile
@@ -163,6 +184,53 @@ final class BuiltInCommandsTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteCommandsOpenAndSynchronizeRepository() async throws {
+        let mirrorRoot = try temporaryDirectory(named: "remote")
+        defer { try? FileManager.default.removeItem(at: mirrorRoot.deletingLastPathComponent()) }
+        let remoteService = BuiltInCommandsTestRemoteService(mirrorRoot: mirrorRoot)
+        let explorer = makeExplorer(remoteService: remoteService)
+        let workspace = WorkspaceModel(arguments: ["DevHQ"])
+        let manager = CommandManager()
+        var pickerCalls = 0
+        try registerBuiltInCommands(
+            in: manager,
+            workspace: workspace,
+            worktreeExplorer: explorer,
+            pickers: BuiltInCommandPickers(
+                repositoryURL: { nil },
+                remoteRepositorySpec: {
+                    pickerCalls += 1
+                    return "git.example.com:/srv/project"
+                },
+                fileURL: { _ in nil },
+                directoryURL: { _ in nil }
+            )
+        )
+
+        try manager.execute(
+            id: "devhq:open-remote-repo",
+            in: CommandContext(view: .worktree)
+        )
+        await waitUntil { explorer.repositories.first?.worktrees.count == 1 }
+
+        XCTAssertEqual(pickerCalls, 1)
+        XCTAssertEqual(
+            explorer.repositories.first?.remoteSource?.specification,
+            "git.example.com:/srv/project"
+        )
+        var synchronizationCount = await remoteService.synchronizationCount
+        XCTAssertEqual(synchronizationCount, 1)
+
+        try manager.execute(
+            id: "devhq:sync-remote-repos",
+            in: CommandContext(view: .file)
+        )
+        await waitUntil { await remoteService.synchronizationCount == 2 }
+        synchronizationCount = await remoteService.synchronizationCount
+        XCTAssertEqual(synchronizationCount, 2)
+    }
+
+    @MainActor
     func testCancelledPickersHaveNoModelSideEffects() throws {
         let workspaceRoot = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: workspaceRoot) }
@@ -170,6 +238,7 @@ final class BuiltInCommandsTests: XCTestCase {
         workspace.openWorkspace(workspaceRoot)
         let explorer = makeExplorer()
         var repositoryPickerCalls = 0
+        var remoteRepositoryPickerCalls = 0
         var filePickerCalls = 0
         var directoryPickerCalls = 0
         let manager = CommandManager()
@@ -180,6 +249,10 @@ final class BuiltInCommandsTests: XCTestCase {
             pickers: BuiltInCommandPickers(
                 repositoryURL: {
                     repositoryPickerCalls += 1
+                    return nil
+                },
+                remoteRepositorySpec: {
+                    remoteRepositoryPickerCalls += 1
                     return nil
                 },
                 fileURL: { _ in
@@ -194,10 +267,12 @@ final class BuiltInCommandsTests: XCTestCase {
         )
 
         try manager.execute(id: "worktree:add-repo", in: CommandContext(view: .worktree))
+        try manager.execute(id: "devhq:open-remote-repo", in: CommandContext(view: .worktree))
         try manager.execute(id: "file:new", in: CommandContext(view: .file))
         try manager.execute(id: "file:new-dir", in: CommandContext(view: .document))
 
         XCTAssertEqual(repositoryPickerCalls, 1)
+        XCTAssertEqual(remoteRepositoryPickerCalls, 1)
         XCTAssertEqual(filePickerCalls, 1)
         XCTAssertEqual(directoryPickerCalls, 1)
         XCTAssertTrue(explorer.repositories.isEmpty)
@@ -221,6 +296,7 @@ final class BuiltInCommandsTests: XCTestCase {
             worktreeExplorer: explorer,
             pickers: BuiltInCommandPickers(
                 repositoryURL: { missingRepository },
+                remoteRepositorySpec: { nil },
                 fileURL: { _ in nil },
                 directoryURL: { _ in nil }
             )
@@ -255,6 +331,7 @@ final class BuiltInCommandsTests: XCTestCase {
             worktreeExplorer: makeExplorer(),
             pickers: BuiltInCommandPickers(
                 repositoryURL: { nil },
+                remoteRepositorySpec: { nil },
                 fileURL: { _ in existingFile },
                 directoryURL: { _ in existingDirectory }
             )
@@ -284,19 +361,32 @@ final class BuiltInCommandsTests: XCTestCase {
 
     @MainActor
     private func makeExplorer(
-        discoverer: any GitWorktreeDiscovering = BuiltInCommandsTestDiscoverer(repository: nil)
+        discoverer: any GitWorktreeDiscovering = BuiltInCommandsTestDiscoverer(repository: nil),
+        remoteService: (any SSHRemoteRepositoryServicing)? = nil
     ) -> WorktreeExplorerModel {
         WorktreeExplorerModel(
             discoverer: discoverer,
+            remoteService: remoteService,
             onActivate: { _, _ in },
             watcherFactory: { _, _ in BuiltInCommandsTestWatcher() },
             eventDelivery: { $0() }
         )
     }
 
+    private func waitUntil(
+        attempts: Int = 100,
+        _ predicate: @escaping @MainActor () async -> Bool
+    ) async {
+        for _ in 0..<attempts {
+            if await predicate() { return }
+            await Task.yield()
+        }
+    }
+
     private func cancellingPickers() -> BuiltInCommandPickers {
         BuiltInCommandPickers(
             repositoryURL: { nil },
+            remoteRepositorySpec: { nil },
             fileURL: { _ in nil },
             directoryURL: { _ in nil }
         )
@@ -328,4 +418,39 @@ private final class BuiltInCommandsTestDiscoverer: GitWorktreeDiscovering {
 
 private final class BuiltInCommandsTestWatcher: RepositoryWatching {
     func cancel() {}
+}
+
+private actor BuiltInCommandsTestRemoteService: SSHRemoteRepositoryServicing {
+    nonisolated let mirrorRoot: URL
+    private(set) var synchronizationCount = 0
+
+    init(mirrorRoot: URL) {
+        self.mirrorRoot = mirrorRoot
+    }
+
+    nonisolated func parseSource(_ specification: String) throws -> SSHRemoteRepositorySource {
+        try SSHRemoteRepositorySource(specification: specification)
+    }
+
+    nonisolated func mirrorPath(for source: SSHRemoteRepositorySource) -> URL {
+        mirrorRoot
+    }
+
+    func synchronize(
+        _ source: SSHRemoteRepositorySource
+    ) async throws -> SSHRemoteRepositorySnapshot {
+        synchronizationCount += 1
+        return SSHRemoteRepositorySnapshot(
+            source: source,
+            rootURL: mirrorRoot,
+            gitDirectoryURL: mirrorRoot.appendingPathComponent(".git", isDirectory: true),
+            worktrees: [SSHRemoteWorktreeSnapshot(
+                name: "main",
+                localURL: mirrorRoot,
+                remotePath: source.remotePath,
+                isMain: true,
+                head: "0123456789abcdef"
+            )]
+        )
+    }
 }

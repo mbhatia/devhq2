@@ -424,7 +424,7 @@ private struct WorktreeExplorerRow: View {
             Text(nodes.map(\.value.name).joined(separator: "/"))
         }
             .lineLimit(1)
-            .help(terminal.value.url.path)
+            .help(terminal.value.tooltip)
             .padding(.vertical, 3)
             .onHover { isHovered = $0 }
     }

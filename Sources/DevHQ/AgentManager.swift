@@ -22,12 +22,18 @@ struct AgentWorktreeContext: Equatable {
     let repositoryURL: URL
     let worktreeName: String
     let worktreeURL: URL
+    let remoteSource: SSHRemoteRepositorySource?
+    let remoteWorktreePath: String?
 
     init(repository: GitRepositoryInfo, worktree: GitWorktreeInfo) {
         repositoryName = repository.canonicalName
         repositoryURL = repository.rootURL.standardizedFileURL.resolvingSymlinksInPath()
         worktreeName = worktree.name
         worktreeURL = worktree.url.standardizedFileURL.resolvingSymlinksInPath()
+        remoteSource = repository.remoteSource
+        remoteWorktreePath = repository.remoteSource == nil
+            ? nil
+            : worktree.remotePath ?? repository.remoteSource?.remotePath
     }
 }
 
@@ -283,7 +289,9 @@ final class AgentManager: ObservableObject {
         workspace.openWorktree(
             canonicalRepositoryName: context.repositoryName,
             worktreeName: context.worktreeName,
-            url: context.worktreeURL
+            url: context.worktreeURL,
+            remoteSource: context.remoteSource,
+            remotePath: context.remoteWorktreePath
         )
     }
 
@@ -304,18 +312,32 @@ final class AgentManager: ObservableObject {
         return try workspace.newTerminal(
             workingDirectory: context.worktreeURL,
             shellCommand: command,
-            environment: [
-                "REPO": context.repositoryURL.path,
-                "REPO_ID": context.repositoryName,
-                "AGENT_PROFILE": profile.name,
-                "AGENT_NAME": Self.environmentName(name),
-                "THREAD_ID": threadID ?? ""
-            ],
+            environment: Self.launchEnvironment(
+                profileName: profile.name,
+                name: name,
+                threadID: threadID,
+                context: context
+            ),
             builtInCodexBody: AgentProfileDefaults.codexCommandBody(
                 profileName: profile.name,
                 command: command
             )
         )
+    }
+
+    static func launchEnvironment(
+        profileName: String,
+        name: String,
+        threadID: String?,
+        context: AgentWorktreeContext
+    ) -> [String: String] {
+        [
+            "REPO": context.remoteSource?.remotePath ?? context.repositoryURL.path,
+            "REPO_ID": context.repositoryName,
+            "AGENT_PROFILE": profileName,
+            "AGENT_NAME": environmentName(name),
+            "THREAD_ID": threadID ?? ""
+        ]
     }
 
     private func attach(

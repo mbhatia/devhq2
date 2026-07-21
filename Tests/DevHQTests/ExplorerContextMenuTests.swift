@@ -118,6 +118,46 @@ final class ExplorerContextMenuTests: XCTestCase {
     }
 
     @MainActor
+    func testCreateWorktreeRejectsRemoteRepository() throws {
+        let fixture = makeFixture(remote: true)
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let explorer = makeExplorer(
+            discoverer: ContextMenuTestDiscoverer(repository: fixture.repository)
+        )
+        try explorer.addRepository(fixture.main)
+        let manager = ContextMenuTestWorktreeManager()
+        var promptCalls = 0
+        let registry = ContextMenuRegistry()
+        registerBuiltInContextMenus(
+            in: registry,
+            workspace: WorkspaceModel(arguments: ["DevHQ"]),
+            worktreeExplorer: explorer,
+            settings: EditorSettings(),
+            worktreeManager: manager,
+            promptForBranchName: {
+                promptCalls += 1
+                return "feature/remote"
+            }
+        )
+        let snapshot = try XCTUnwrap(worktreeContextMenuSnapshot(
+            for: explorer.tree.roots[0],
+            in: explorer
+        ))
+        let action = try XCTUnwrap(registry.registeredItems.first {
+            $0.id == BuiltInContextMenuID.createWorktree
+        })
+
+        XCTAssertThrowsError(try action.perform(with: snapshot)) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Remote repositories do not support local worktree creation."
+            )
+        }
+        XCTAssertEqual(promptCalls, 0)
+        XCTAssertNil(manager.created)
+    }
+
+    @MainActor
     func testDeleteWorktreeClosesActiveWorkspaceAndRefreshesExplorer() throws {
         let fixture = makeFixture(includeLinkedWorktree: true)
         defer { try? FileManager.default.removeItem(at: fixture.container) }
@@ -154,6 +194,41 @@ final class ExplorerContextMenuTests: XCTestCase {
         XCTAssertEqual(manager.deleted?.worktree, fixture.linked)
         XCTAssertNil(workspace.rootURL)
         XCTAssertEqual(explorer.repositories[0].worktrees.map(\.name), ["main"])
+    }
+
+    @MainActor
+    func testDeleteWorktreeRejectsRemoteRepository() throws {
+        let fixture = makeFixture(includeLinkedWorktree: true, remote: true)
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let explorer = makeExplorer(
+            discoverer: ContextMenuTestDiscoverer(repository: fixture.repository)
+        )
+        try explorer.addRepository(fixture.main)
+        let manager = ContextMenuTestWorktreeManager()
+        let registry = ContextMenuRegistry()
+        registerBuiltInContextMenus(
+            in: registry,
+            workspace: WorkspaceModel(arguments: ["DevHQ"]),
+            worktreeExplorer: explorer,
+            settings: EditorSettings(),
+            worktreeManager: manager
+        )
+        let worktreeNode = try XCTUnwrap(explorer.tree.roots[0].children?[1])
+        let snapshot = try XCTUnwrap(worktreeContextMenuSnapshot(
+            for: worktreeNode,
+            in: explorer
+        ))
+        let action = try XCTUnwrap(registry.registeredItems.first {
+            $0.id == BuiltInContextMenuID.deleteWorktree
+        })
+
+        XCTAssertThrowsError(try action.perform(with: snapshot)) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Remote repositories do not support local worktree deletion."
+            )
+        }
+        XCTAssertNil(manager.deleted)
     }
 
     @MainActor
@@ -416,7 +491,8 @@ final class ExplorerContextMenuTests: XCTestCase {
     }
 
     private func makeFixture(
-        includeLinkedWorktree: Bool = false
+        includeLinkedWorktree: Bool = false,
+        remote: Bool = false
     ) -> (container: URL, main: URL, linked: URL, repository: GitRepositoryInfo) {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -430,18 +506,27 @@ final class ExplorerContextMenuTests: XCTestCase {
             + (includeLinkedWorktree
                 ? [GitWorktreeInfo(name: "feature", url: linked, isMain: false)]
                 : [])
-        return (container, main, linked, repository(main: main, worktrees: worktrees))
+        return (
+            container,
+            main,
+            linked,
+            repository(main: main, worktrees: worktrees, remote: remote)
+        )
     }
 
     private func repository(
         main: URL,
-        worktrees: [GitWorktreeInfo]
+        worktrees: [GitWorktreeInfo],
+        remote: Bool = false
     ) -> GitRepositoryInfo {
         GitRepositoryInfo(
             rootURL: main,
             name: "project",
             gitDirectoryURL: main.appendingPathComponent(".git", isDirectory: true),
-            worktrees: worktrees
+            worktrees: worktrees,
+            remoteSource: remote
+                ? try! SSHRemoteRepositorySource(server: "example.com", remotePath: "/srv/project")
+                : nil
         )
     }
 }
