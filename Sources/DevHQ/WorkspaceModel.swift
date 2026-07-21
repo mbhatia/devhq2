@@ -121,6 +121,9 @@ final class WorkspaceModel: ObservableObject {
     private let stateStore: WorkspaceStatePersisting?
     private var persistentWorkspaceIdentity: PersistentWorkspaceIdentity?
     private var lastSelectedDocumentID: UUID?
+    /// Reports terminal tabs closed by an explicit UI or workspace operation.
+    /// Natural process exits are reported by `TerminalSession.onNaturalExit` instead.
+    var onTerminalExplicitlyClosed: ((TerminalSession) -> Void)?
 
     var selectedDocument: EditorDocument? {
         documents.first { $0.id == selectedDocumentID }
@@ -374,6 +377,105 @@ final class WorkspaceModel: ObservableObject {
         return terminal
     }
 
+    /// Launches a shell command with per-process environment additions without
+    /// changing DevHQ's process environment. Existing `terminal.new` launches
+    /// continue to use the argv-based overload above.
+    @discardableResult
+    func newTerminal(
+        workingDirectory: URL,
+        shellCommand: String,
+        environment: [String: String],
+        builtInCodexBody: String? = nil
+    ) throws -> TerminalSession {
+        let processEnvironment = ProcessInfo.processInfo.environment
+        let command = if let builtInCodexBody {
+            Self.codexSessionCommandArguments(
+                commandBody: builtInCodexBody,
+                environment: environment,
+                processEnvironment: processEnvironment
+            )
+        } else {
+            Self.shellCommandArguments(
+                shellCommand: shellCommand,
+                environment: environment,
+                processEnvironment: processEnvironment
+            )
+        }
+        return try newTerminal(
+            workingDirectory: workingDirectory,
+            command: command,
+            shell: Self.resolvedLoginShell(processEnvironment: processEnvironment)
+        )
+    }
+
+    static func shellCommandArguments(
+        shellCommand: String,
+        environment: [String: String],
+        processEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        ["/usr/bin/env"]
+            + environmentAssignments(environment)
+            + [resolvedLoginShell(processEnvironment: processEnvironment), "-l", "-c", shellCommand]
+    }
+
+    /// Builds the built-in Codex session-manager launcher. The dispatcher is
+    /// parsed only by non-login POSIX sh. The selected user shell parses only
+    /// the final Codex command, once, after the agent environment is installed.
+    static func codexSessionCommandArguments(
+        commandBody: String,
+        environment: [String: String],
+        processEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        let shell = resolvedLoginShell(processEnvironment: processEnvironment)
+        let childArguments = ["/usr/bin/env"]
+            + environmentAssignments(environment)
+            + [shell, "-l", "-c", commandBody]
+        let serializedChild = serializePOSIXShellWords(childArguments)
+        let session = ["REPO_ID", "AGENT_PROFILE", "AGENT_NAME"]
+            .map { environment[$0] ?? "" }
+            .joined(separator: ":")
+        let quotedSession = posixSingleQuote(session)
+        let quotedChild = posixSingleQuote(serializedChild)
+        let directChild = serializePOSIXShellWords(childArguments)
+        let dispatcher = """
+        if command -v shpool >/dev/null 2>&1 && [ -f "$HOME/.config/shpool/config.toml" ]; then
+          exec shpool -c "$HOME/.config/shpool/config.toml" attach -f -d "$PWD" -c \(quotedChild) \(quotedSession)
+        fi
+        if command -v shpool >/dev/null 2>&1; then
+          exec shpool attach -f -d "$PWD" -c \(quotedChild) \(quotedSession)
+        fi
+        if command -v atch >/dev/null 2>&1; then
+          exec atch \(quotedSession) \(directChild)
+        fi
+        exec \(directChild)
+        """
+        return ["/usr/bin/env"]
+            + environmentAssignments(environment)
+            + ["/bin/sh", "-c", dispatcher]
+    }
+
+    static func resolvedLoginShell(processEnvironment: [String: String]) -> String {
+        guard let shell = processEnvironment["SHELL"],
+              !shell.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "/bin/sh"
+        }
+        return shell
+    }
+
+    private static func environmentAssignments(_ environment: [String: String]) -> [String] {
+        environment.keys.sorted().map { key in
+            "\(key)=\(environment[key] ?? "")"
+        }
+    }
+
+    private static func serializePOSIXShellWords(_ words: [String]) -> String {
+        words.map(posixSingleQuote).joined(separator: " ")
+    }
+
+    private static func posixSingleQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     func close(_ document: EditorDocument) {
         guard let index = documents.firstIndex(where: { $0.id == document.id }) else { return }
         documents.remove(at: index)
@@ -386,10 +488,29 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func close(_ terminal: TerminalSession) {
-        guard let index = tabs.firstIndex(where: { $0.id == terminal.id }) else { return }
-        terminal.close()
-        tabs.remove(at: index)
-        if selectedTabID == terminal.id { selectAdjacentTab(afterRemoving: index) }
+        if let index = tabs.firstIndex(where: { $0.id == terminal.id }) {
+            onTerminalExplicitlyClosed?(terminal)
+            terminal.close()
+            tabs.remove(at: index)
+            if selectedTabID == terminal.id { selectAdjacentTab(afterRemoving: index) }
+            return
+        }
+
+        for key in editorSessions.keys {
+            guard var session = editorSessions[key],
+                  let index = session.tabs.firstIndex(where: { $0.id == terminal.id }) else {
+                continue
+            }
+            onTerminalExplicitlyClosed?(terminal)
+            terminal.close()
+            session.tabs.remove(at: index)
+            if session.selectedTabID == terminal.id {
+                session.selectedTabID = session.lastSelectedDocumentID
+                session.selectedDocumentID = session.lastSelectedDocumentID
+            }
+            editorSessions[key] = session
+            return
+        }
     }
 
     /// Closes the active tab. Unsaved text is discarded, matching the existing
@@ -667,6 +788,7 @@ final class WorkspaceModel: ObservableObject {
 
         var closedTerminalIDs = Set<UUID>()
         for terminal in terminals where closedTerminalIDs.insert(terminal.id).inserted {
+            onTerminalExplicitlyClosed?(terminal)
             terminal.close()
         }
 
@@ -683,7 +805,10 @@ final class WorkspaceModel: ObservableObject {
 
     func closeAllTerminals() {
         let activeTerminalID = selectedTerminal?.id
-        for terminal in allTerminalSessions { terminal.close() }
+        for terminal in allTerminalSessions {
+            onTerminalExplicitlyClosed?(terminal)
+            terminal.close()
+        }
         tabs.removeAll { $0.terminal != nil }
         for key in editorSessions.keys {
             guard var session = editorSessions[key] else { continue }

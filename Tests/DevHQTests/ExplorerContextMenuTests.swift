@@ -23,6 +23,7 @@ private final class ContextMenuTestWorktreeManager: GitWorktreeManaging {
     var deleted: (repository: URL, worktree: URL)?
     var onCreate: (() -> Void)?
     var onDelete: (() -> Void)?
+    var deletionError: Error?
 
     func createWorktree(
         in repositoryURL: URL,
@@ -35,9 +36,15 @@ private final class ContextMenuTestWorktreeManager: GitWorktreeManaging {
     }
 
     func deleteWorktree(in repositoryURL: URL, at worktreeURL: URL) throws {
+        if let deletionError { throw deletionError }
         deleted = (repositoryURL, worktreeURL)
         onDelete?()
     }
+}
+
+@MainActor
+private final class ContextMenuTestPatternMatcher: LuaPatternMatching {
+    func firstCapture(in text: String, pattern: String) throws -> String? { nil }
 }
 
 final class ExplorerContextMenuTests: XCTestCase {
@@ -147,6 +154,72 @@ final class ExplorerContextMenuTests: XCTestCase {
         XCTAssertEqual(manager.deleted?.worktree, fixture.linked)
         XCTAssertNil(workspace.rootURL)
         XCTAssertEqual(explorer.repositories[0].worktrees.map(\.name), ["main"])
+    }
+
+    @MainActor
+    func testDeleteWorktreeRemovesAgentsOnlyAfterDeletionSucceeds() throws {
+        let fixture = makeFixture(includeLinkedWorktree: true)
+        defer { try? FileManager.default.removeItem(at: fixture.container) }
+        let discoverer = ContextMenuTestDiscoverer(repository: fixture.repository)
+        let workspace = WorkspaceModel(arguments: ["DevHQ"])
+        let profiles = AgentProfileRegistry(profiles: [AgentProfile(
+            name: "test",
+            start: "sleep 30",
+            resume: nil,
+            resumeThread: nil,
+            icon: nil,
+            iconFont: .system,
+            iconColor: nil,
+            thread: nil
+        )])
+        let agentManager = AgentManager(
+            workspace: workspace,
+            profiles: profiles,
+            patternMatcher: ContextMenuTestPatternMatcher()
+        )
+        defer {
+            agentManager.removeAgents(in: fixture.repository)
+            workspace.closeAllTerminals()
+        }
+        let explorer = makeExplorer(discoverer: discoverer, agentManager: agentManager)
+        try explorer.addRepository(fixture.main)
+        let linked = fixture.repository.worktrees[1]
+        let record = try agentManager.create(
+            profile: "test",
+            name: "reviewer",
+            repository: fixture.repository,
+            worktree: linked
+        )
+        let manager = ContextMenuTestWorktreeManager()
+        manager.deletionError = CocoaError(.fileWriteUnknown)
+        manager.onDelete = {
+            discoverer.repository = self.repository(
+                main: fixture.main,
+                worktrees: [GitWorktreeInfo(name: "main", url: fixture.main, isMain: true)]
+            )
+        }
+        let registry = ContextMenuRegistry()
+        registerBuiltInContextMenus(
+            in: registry,
+            workspace: workspace,
+            worktreeExplorer: explorer,
+            settings: EditorSettings(),
+            worktreeManager: manager
+        )
+        let linkedNode = try XCTUnwrap(explorer.tree.roots[0].children?[1])
+        let snapshot = try XCTUnwrap(worktreeContextMenuSnapshot(for: linkedNode, in: explorer))
+        let action = try XCTUnwrap(registry.registeredItems.first {
+            $0.id == BuiltInContextMenuID.deleteWorktree
+        })
+
+        XCTAssertThrowsError(try action.perform(with: snapshot))
+        XCTAssertNotNil(agentManager.record(for: record.key))
+        XCTAssertNotNil(agentManager.session(for: record.key))
+
+        manager.deletionError = nil
+        try action.perform(with: snapshot)
+        XCTAssertNil(agentManager.record(for: record.key))
+        XCTAssertNil(agentManager.session(for: record.key))
     }
 
     @MainActor
@@ -330,11 +403,13 @@ final class ExplorerContextMenuTests: XCTestCase {
 
     @MainActor
     private func makeExplorer(
-        discoverer: ContextMenuTestDiscoverer
+        discoverer: ContextMenuTestDiscoverer,
+        agentManager: AgentManager? = nil
     ) -> WorktreeExplorerModel {
         WorktreeExplorerModel(
             discoverer: discoverer,
             onActivate: { _, _ in },
+            agentManager: agentManager,
             watcherFactory: { _, _ in ContextMenuTestWatcher() },
             eventDelivery: { $0() }
         )

@@ -164,6 +164,8 @@ func worktreeContextMenuSnapshot(
             worktreePath: selectedWorktree.url.path,
             isMainWorktree: selectedWorktree.isMain
         )
+    case .agent:
+        return nil
     }
 }
 

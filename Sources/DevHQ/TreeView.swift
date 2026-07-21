@@ -11,6 +11,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
     @ObservedObject var model: TreeModel<ID, Value>
     let selectedID: ID?
     let onToggle: ((TreeNode<ID, Value>) -> Void)?
+    let isBranchSelectable: (TreeNode<ID, Value>) -> Bool
     let onSelect: (TreeNode<ID, Value>) -> Void
     let contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])?
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
@@ -19,6 +20,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
         model: TreeModel<ID, Value>,
         selectedID: ID?,
         onToggle: ((TreeNode<ID, Value>) -> Void)? = nil,
+        isBranchSelectable: @escaping (TreeNode<ID, Value>) -> Bool = { _ in false },
         contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])? = nil,
         onSelect: @escaping (TreeNode<ID, Value>) -> Void,
         @ViewBuilder rowContent: @escaping (TreeNode<ID, Value>) -> RowContent
@@ -26,6 +28,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
         self.model = model
         self.selectedID = selectedID
         self.onToggle = onToggle
+        self.isBranchSelectable = isBranchSelectable
         self.onSelect = onSelect
         self.contextMenuProvider = contextMenuProvider
         self.rowContent = rowContent
@@ -38,6 +41,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
             selectedID: selectedID,
             level: 0,
             onToggle: onToggle,
+            isBranchSelectable: isBranchSelectable,
             onSelect: onSelect,
             contextMenuProvider: contextMenuProvider,
             rowContent: rowContent
@@ -51,6 +55,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
     let selectedID: ID?
     let level: Int
     let onToggle: ((TreeNode<ID, Value>) -> Void)?
+    let isBranchSelectable: (TreeNode<ID, Value>) -> Bool
     let onSelect: (TreeNode<ID, Value>) -> Void
     let contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])?
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
@@ -58,37 +63,43 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
     var body: some View {
         ForEach(nodes) { node in
             VStack(alignment: .leading, spacing: 1) {
-                Button {
-                    if node.isBranch {
-                        if let onToggle {
-                            onToggle(node)
-                        } else {
-                            model.toggle(node)
-                        }
-                    } else {
-                        onSelect(node)
-                    }
-                } label: {
-                    HStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    Button {
+                        toggle(node)
+                    } label: {
                         Image(systemName: disclosureIcon(for: node))
                             .font(.system(size: 9, weight: .semibold))
                             .frame(width: 12)
                             .foregroundStyle(.secondary)
                             .opacity(node.isBranch ? 1 : 0)
-                        rowContent(node)
-                        Spacer(minLength: 0)
                     }
-                    .padding(.leading, CGFloat(level * 14))
-                    .padding(.vertical, 2)
-                    .background(
-                        node.id == selectedID
-                            ? Color.accentColor.opacity(0.22)
-                            : Color.clear
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .disabled(!node.isBranch)
+
+                    Button {
+                        if node.isBranch, !isBranchSelectable(node) {
+                            toggle(node)
+                        } else {
+                            onSelect(node)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            rowContent(node)
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+                .padding(.leading, CGFloat(level * 14))
+                .padding(.vertical, 2)
+                .background(
+                    node.id == selectedID
+                        ? Color.accentColor.opacity(0.22)
+                        : Color.clear
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .contentShape(Rectangle())
                 .contextMenu {
                     if let entries = contextMenuProvider?(node) {
                         ForEach(entries) { entry in
@@ -105,6 +116,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                         selectedID: selectedID,
                         level: level + 1,
                         onToggle: onToggle,
+                        isBranchSelectable: isBranchSelectable,
                         onSelect: onSelect,
                         contextMenuProvider: contextMenuProvider,
                         rowContent: rowContent
@@ -116,5 +128,13 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
 
     private func disclosureIcon(for node: TreeNode<ID, Value>) -> String {
         model.isExpanded(node) ? "chevron.down" : "chevron.right"
+    }
+
+    private func toggle(_ node: TreeNode<ID, Value>) {
+        if let onToggle {
+            onToggle(node)
+        } else {
+            model.toggle(node)
+        }
     }
 }

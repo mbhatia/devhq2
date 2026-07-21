@@ -263,21 +263,27 @@ private final class LuaConfigAPI: LuaModuleRegistrable {
     }
 
     func pushLuaTable(onto state: LuaPluginState) {
-        state.newtable(nrec: 1)
+        state.newtable(nrec: 2)
         let git = LuaGitConfigAPI(settings: settings)
         git.pushLuaTable(onto: state)
         state.rawset(-2, utf8Key: git.luaName)
+
+        state.newtable(nrec: 1)
+        AgentProfileDefaults.pushCodexTable(onto: state)
+        state.rawset(-2, utf8Key: AgentProfileDefaults.codexName)
+        state.rawset(-2, utf8Key: "agents")
     }
 }
 
 @MainActor
 final class LuaPluginHost: ObservableObject {
-    static let apiVersion = "0.3"
+    static let apiVersion = "0.4"
 
     let settings: EditorSettings
     let configDirectory: URL
     let commandManager: CommandManager
     let contextMenuRegistry: ContextMenuRegistry
+    let agentProfileRegistry: AgentProfileRegistry
     private weak var workspace: WorkspaceModel?
     private let state = LuaState(libraries: .all)
 
@@ -311,12 +317,14 @@ final class LuaPluginHost: ObservableObject {
         configDirectory: URL,
         commandManager: CommandManager,
         workspace: WorkspaceModel? = nil,
-        contextMenuRegistry: ContextMenuRegistry? = nil
+        contextMenuRegistry: ContextMenuRegistry? = nil,
+        agentProfileRegistry: AgentProfileRegistry? = nil
     ) {
         self.settings = settings
         self.configDirectory = configDirectory
         self.commandManager = commandManager
         self.contextMenuRegistry = contextMenuRegistry ?? ContextMenuRegistry()
+        self.agentProfileRegistry = agentProfileRegistry ?? AgentProfileRegistry()
         self.workspace = workspace
         state.setRequireRoot(configDirectory.path)
         do {
@@ -335,6 +343,8 @@ final class LuaPluginHost: ObservableObject {
         guard FileManager.default.fileExists(atPath: scriptURL.path) else { return }
         do {
             try loadScript(at: scriptURL)
+            let profiles = try AgentProfileConfiguration.decode(from: state)
+            agentProfileRegistry.replace(with: profiles)
         } catch {
             settings.pluginError = "\(scriptURL.path): \(error.localizedDescription)"
         }
@@ -356,6 +366,17 @@ final class LuaPluginHost: ObservableObject {
     }
 
     private func registerModule() throws {
+        let styleAPI = LuaStyleAPI()
+        styleAPI.pushLuaTable(onto: state)
+        let styleTable = state.popref()
+        let openStyleModule: LuaClosure = { state in
+            state.push(styleTable)
+            return 1
+        }
+        try state.requiref(name: styleAPI.luaName, global: true) {
+            state.push(openStyleModule)
+        }
+
         let commandAPI = LuaCommandAPI(commandManager: commandManager)
         commandAPI.pushLuaTable(onto: state)
         let commandTable = state.popref()
@@ -408,7 +429,7 @@ final class LuaPluginHost: ObservableObject {
             LuaDocViewAPI(settings: settings)
         ]
         let openModule: LuaClosure = { state in
-            state.newtable(nrec: CInt(modules.count + 4))
+            state.newtable(nrec: CInt(modules.count + 5))
             for module in modules {
                 module.pushLuaTable(onto: state)
                 state.rawset(-2, utf8Key: module.luaName)
@@ -421,6 +442,8 @@ final class LuaPluginHost: ObservableObject {
             state.rawset(-2, utf8Key: contextMenuAPI.luaName)
             state.push(configTable)
             state.rawset(-2, utf8Key: configAPI.luaName)
+            state.push(styleTable)
+            state.rawset(-2, utf8Key: styleAPI.luaName)
             return 1
         }
         try state.requiref(name: "devhq", global: false) {
@@ -428,4 +451,23 @@ final class LuaPluginHost: ObservableObject {
         }
     }
 
+}
+
+extension LuaPluginHost: LuaPatternMatching {
+    func firstCapture(in text: String, pattern: String) throws -> String? {
+        let stringLibrary = try state.globals.get("string")
+        let find = try stringLibrary.get("find")
+        let originalTop = state.gettop()
+        defer { state.settop(originalTop) }
+
+        state.push(find)
+        state.push(text)
+        state.push(pattern)
+        try state.pcall(nargs: 2, nret: MultiRet)
+
+        // string.find returns start/end followed by captures. A successful
+        // capture-less pattern therefore has only two results.
+        guard state.gettop() - originalTop >= 3 else { return nil }
+        return state.tostring(originalTop + 3)
+    }
 }

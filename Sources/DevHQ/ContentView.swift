@@ -342,6 +342,10 @@ private struct WorktreeExplorerSidebar: View {
                         model: explorer.tree,
                         selectedID: explorer.selectedNodeID,
                         onToggle: { node in explorer.toggle(node) },
+                        isBranchSelectable: { node in
+                            if case .worktree = node.value { return true }
+                            return false
+                        },
                         contextMenuProvider: { node in
                             guard let snapshot = worktreeContextMenuSnapshot(
                                 for: node,
@@ -356,7 +360,11 @@ private struct WorktreeExplorerSidebar: View {
                     ) { node in
                         explorer.activate(node)
                     } rowContent: { node in
-                        WorktreeExplorerRow(node: node)
+                        WorktreeExplorerRow(
+                            node: node,
+                            profile: agentProfile(for: node),
+                            isSelected: explorer.selectedNodeID == node.id
+                        )
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -382,23 +390,57 @@ private struct WorktreeExplorerSidebar: View {
             // The explorer publishes operation errors through errorMessage.
         }
     }
+
+    private func agentProfile(for node: WorktreeNode) -> AgentProfile? {
+        guard case .agent(let agent) = node.value else { return nil }
+        return explorer.profile(for: agent)
+    }
 }
 
 private struct WorktreeExplorerRow: View {
     let node: WorktreeNode
+    let profile: AgentProfile?
+    let isSelected: Bool
+    @State private var isHovered = false
 
     var body: some View {
-        Label(node.value.name, systemImage: iconName)
+        HStack(spacing: 6) {
+            if case .agent = node.value {
+                Text(profile?.icon ?? "@")
+                    .font(agentIconFont)
+                    .foregroundStyle(agentIconColor)
+                    .frame(width: 16)
+            } else {
+                Image(systemName: iconName)
+            }
+            Text(node.value.name)
+        }
             .lineLimit(1)
             .help(node.value.url.path)
             .padding(.vertical, 3)
+            .onHover { isHovered = $0 }
     }
 
     private var iconName: String {
         switch node.value {
         case .repository: "externaldrive"
         case .worktree: "arrow.triangle.branch"
+        case .agent: "at"
         }
+    }
+
+    private var agentIconFont: Font {
+        switch profile?.iconFont ?? .system {
+        case .system: .system(size: 12, weight: .semibold)
+        }
+    }
+
+    private var agentIconColor: Color {
+        if profile?.iconColor == .accent { return .accentColor }
+        guard case .agent(let agent) = node.value else { return .secondary }
+        if agent.needsInput { return Color(nsColor: .systemOrange) }
+        if isSelected || isHovered { return .accentColor }
+        return .secondary
     }
 }
 

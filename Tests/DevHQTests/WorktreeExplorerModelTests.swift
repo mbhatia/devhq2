@@ -77,7 +77,322 @@ private final class FakeWorkspaceStateStore: WorkspaceStatePersisting {
     ) throws {}
 }
 
+@MainActor
+private final class ExplorerAgentPatternMatcher: LuaPatternMatching {
+    func firstCapture(in text: String, pattern: String) throws -> String? { nil }
+}
+
 final class WorktreeExplorerModelTests: XCTestCase {
+    @MainActor
+    func testRestoresSanitizedDormantAgentsUnderExpandedWorktree() throws {
+        let current = repository(
+            at: "/repos/project",
+            worktrees: [worktree("main", at: "/repos/project", isMain: true)]
+        )
+        let store = FakeWorkspaceStateStore()
+        store.loadedRepositories = [PersistedRepositoryState(
+            canonicalName: "project",
+            rootPath: current.rootURL.path,
+            gitDirectoryPath: current.gitDirectoryURL.path,
+            isExpanded: true,
+            worktrees: [PersistedWorktreeState(
+                branchName: "main",
+                path: current.rootURL.path,
+                isMain: true,
+                isExpanded: true,
+                isSelected: false,
+                agents: [
+                    PersistedAgentState(
+                        profile: "codex",
+                        name: "  reviewer  ",
+                        needsInput: true,
+                        threadID: "thread-1"
+                    ),
+                    PersistedAgentState(
+                        profile: "codex",
+                        name: "reviewer",
+                        needsInput: false,
+                        threadID: nil
+                    ),
+                    PersistedAgentState(
+                        profile: " ",
+                        name: "ignored",
+                        needsInput: false,
+                        threadID: nil
+                    ),
+                    PersistedAgentState(
+                        profile: "missing",
+                        name: "legacy",
+                        needsInput: false,
+                        threadID: nil
+                    )
+                ]
+            )]
+        )]
+        let manager = makeAgentManager()
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in },
+            agentManager: manager,
+            stateStore: store,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+
+        model.restore(activateSelection: false)
+
+        let worktreeNode = try XCTUnwrap(model.tree.roots.first?.children?.first)
+        let agentNodes = try XCTUnwrap(worktreeNode.children)
+        XCTAssertEqual(agentNodes.map(\.value.name), [
+            "! reviewer [codex]", "legacy [missing]"
+        ])
+        XCTAssertTrue(model.tree.isExpanded(worktreeNode))
+        guard case .agent(let reviewer) = agentNodes[0].value,
+              case .agent(let legacy) = agentNodes[1].value else {
+            return XCTFail("Expected agent leaf nodes")
+        }
+        XCTAssertNil(manager.session(for: reviewer.key), "Restore must not launch an agent")
+        XCTAssertNil(model.profile(for: legacy), "Missing profiles use safe UI fallbacks")
+        XCTAssertNil(worktreeContextMenuSnapshot(for: agentNodes[0], in: model))
+        XCTAssertEqual(store.repositoryWrites.last?[0].worktrees[0].agents.count, 2)
+    }
+
+    @MainActor
+    func testAgentSelectionActivatesAgentWithoutChangingWorktreeSelectionMeaning() throws {
+        let current = repository(
+            at: "/repos/project",
+            worktrees: [worktree("main", at: "/repos/project", isMain: true)]
+        )
+        let manager = makeAgentManager()
+        var worktreeActivations = 0
+        var activatedAgent: AgentRecord?
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in worktreeActivations += 1 },
+            agentManager: manager,
+            onActivateAgent: { agent, repository, worktree in
+                XCTAssertEqual(repository.id, current.id)
+                XCTAssertEqual(worktree.id, current.worktrees[0].id)
+                activatedAgent = agent
+            },
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(current.rootURL)
+        manager.restore(
+            [PersistedAgentState(
+                profile: "codex",
+                name: "reviewer",
+                needsInput: false,
+                threadID: nil
+            )],
+            repository: model.repositories[0],
+            worktree: current.worktrees[0]
+        )
+        let worktreeNode = try XCTUnwrap(model.tree.roots[0].children?.first)
+        let agentNode = try XCTUnwrap(worktreeNode.children?.first)
+
+        model.activate(agentNode)
+
+        XCTAssertEqual(activatedAgent?.name, "reviewer")
+        XCTAssertEqual(model.selectedAgentID, activatedAgent?.key)
+        XCTAssertEqual(model.selectedWorktreeID, current.worktrees[0].id)
+        XCTAssertEqual(model.selectedNodeID, activatedAgent.map { .agent($0.key) })
+        XCTAssertEqual(worktreeActivations, 0)
+
+        model.activate(worktreeNode)
+        XCTAssertNil(model.selectedAgentID)
+        XCTAssertEqual(model.selectedNodeID, .worktree(current.worktrees[0].id))
+        XCTAssertEqual(worktreeActivations, 1)
+    }
+
+    @MainActor
+    func testCrossWorktreeAgentSelectionSurvivesWorkspaceSelectionSynchronization() throws {
+        let main = worktree("main", at: "/repos/project", isMain: true)
+        let topic = worktree("topic", at: "/worktrees/topic")
+        let current = repository(at: "/repos/project", worktrees: [main, topic])
+        let manager = makeAgentManager()
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in },
+            agentManager: manager,
+            onActivateAgent: { _, _, _ in },
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(current.rootURL)
+        manager.restore(
+            [PersistedAgentState(
+                profile: "codex",
+                name: "reviewer",
+                needsInput: false,
+                threadID: nil
+            )],
+            repository: model.repositories[0],
+            worktree: topic
+        )
+        let agentNode = try XCTUnwrap(
+            model.tree.roots[0].children?.last?.children?.first
+        )
+
+        model.activate(agentNode)
+        let selectedAgentID = try XCTUnwrap(model.selectedAgentID)
+        XCTAssertEqual(model.selectedWorktreeID, topic.id)
+
+        model.syncSelection(with: topic.url)
+        XCTAssertEqual(model.selectedAgentID, selectedAgentID)
+        XCTAssertEqual(model.selectedNodeID, .agent(selectedAgentID))
+
+        model.syncSelection(with: main.url)
+        XCTAssertNil(model.selectedAgentID)
+        XCTAssertEqual(model.selectedNodeID, .worktree(main.id))
+    }
+
+    @MainActor
+    func testAgentChangesRebuildPersistAndRevealWorktree() throws {
+        let current = repository(
+            at: "/repos/project",
+            worktrees: [worktree("main", at: "/repos/project", isMain: true)]
+        )
+        let store = FakeWorkspaceStateStore()
+        let manager = makeAgentManager()
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in },
+            agentManager: manager,
+            stateStore: store,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(current.rootURL)
+
+        manager.restore(
+            [PersistedAgentState(
+                profile: "codex",
+                name: "builder",
+                needsInput: false,
+                threadID: nil
+            )],
+            repository: model.repositories[0],
+            worktree: current.worktrees[0]
+        )
+
+        var worktreeNode = try XCTUnwrap(model.tree.roots[0].children?.first)
+        XCTAssertTrue(model.tree.isExpanded(worktreeNode))
+        XCTAssertEqual(worktreeNode.children?.first?.value.name, "builder [codex]")
+        XCTAssertEqual(store.repositoryWrites.last?[0].worktrees[0].agents.first?.name, "builder")
+
+        manager.restore(
+            [PersistedAgentState(
+                profile: "codex",
+                name: "builder",
+                needsInput: true,
+                threadID: "captured"
+            )],
+            repository: model.repositories[0],
+            worktree: current.worktrees[0]
+        )
+        worktreeNode = try XCTUnwrap(model.tree.roots[0].children?.first)
+        XCTAssertEqual(worktreeNode.children?.first?.value.name, "! builder [codex]")
+        XCTAssertEqual(store.repositoryWrites.last?[0].worktrees[0].agents.first?.threadID, "captured")
+    }
+
+    @MainActor
+    func testRefreshPreservesAgentsAndPurgesThoseForRemovedWorktrees() throws {
+        let main = worktree("main", at: "/repos/project", isMain: true)
+        let topic = worktree("topic", at: "/worktrees/topic")
+        let initial = repository(at: "/repos/project", worktrees: [main, topic])
+        let discoverer = FakeWorktreeDiscoverer([initial])
+        let manager = makeAgentManager()
+        let model = WorktreeExplorerModel(
+            discoverer: discoverer,
+            onActivate: { _, _ in },
+            agentManager: manager,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(initial.rootURL)
+        manager.restore(
+            [PersistedAgentState(
+                profile: "codex",
+                name: "topic-agent",
+                needsInput: false,
+                threadID: nil
+            )],
+            repository: model.repositories[0],
+            worktree: topic
+        )
+
+        let renamed = worktree("renamed-topic", at: topic.url.path)
+        discoverer.repositoriesByPath[initial.rootURL.path] = repository(
+            at: initial.rootURL.path,
+            worktrees: [main, renamed]
+        )
+        model.refreshRepository(id: initial.id)
+        XCTAssertEqual(
+            model.tree.roots[0].children?.last?.children?.first?.value.name,
+            "topic-agent [codex]"
+        )
+        XCTAssertEqual(manager.records(for: renamed.url).count, 1)
+
+        discoverer.repositoriesByPath[initial.rootURL.path] = repository(
+            at: initial.rootURL.path,
+            worktrees: [main]
+        )
+        model.refreshRepository(id: initial.id)
+        XCTAssertTrue(manager.records(for: topic.url).isEmpty)
+        XCTAssertEqual(model.tree.roots[0].children?.count, 1)
+    }
+
+    @MainActor
+    func testWorktreeExpansionWithAgentsRoundTripsThroughRepositoryState() throws {
+        let current = repository(
+            at: "/repos/project",
+            worktrees: [worktree("main", at: "/repos/project", isMain: true)]
+        )
+        let store = FakeWorkspaceStateStore()
+        let manager = makeAgentManager()
+        let model = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in },
+            agentManager: manager,
+            stateStore: store,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        try model.addRepository(current.rootURL)
+        manager.restore(
+            [PersistedAgentState(
+                profile: "codex",
+                name: "builder",
+                needsInput: false,
+                threadID: nil
+            )],
+            repository: model.repositories[0],
+            worktree: current.worktrees[0]
+        )
+        let worktreeNode = try XCTUnwrap(model.tree.roots[0].children?.first)
+        XCTAssertTrue(model.tree.isExpanded(worktreeNode))
+        XCTAssertEqual(store.repositoryWrites.last?[0].worktrees[0].isExpanded, true)
+
+        let restoredStore = FakeWorkspaceStateStore()
+        restoredStore.loadedRepositories = try XCTUnwrap(store.repositoryWrites.last)
+        let restoredManager = makeAgentManager()
+        let restored = WorktreeExplorerModel(
+            discoverer: FakeWorktreeDiscoverer([current]),
+            onActivate: { _, _ in },
+            agentManager: restoredManager,
+            stateStore: restoredStore,
+            watcherFactory: FakeRepositoryWatcherFactory().make,
+            eventDelivery: { $0() }
+        )
+        restored.restore(activateSelection: false)
+
+        let restoredWorktree = try XCTUnwrap(restored.tree.roots[0].children?.first)
+        XCTAssertTrue(restored.tree.isExpanded(restoredWorktree))
+        XCTAssertEqual(restoredWorktree.children?.first?.value.name, "builder [codex]")
+    }
+
     @MainActor
     func testAllocatesStableCanonicalNamesForSameNamedRepositories() throws {
         let first = repository(at: "/repos/one/DevHQ", worktrees: [])
@@ -628,6 +943,15 @@ final class WorktreeExplorerModelTests: XCTestCase {
         watcher.cancel()
 
         wait(for: [changed], timeout: 0.15)
+    }
+
+    @MainActor
+    private func makeAgentManager() -> AgentManager {
+        AgentManager(
+            workspace: WorkspaceModel(),
+            profiles: AgentProfileRegistry(),
+            patternMatcher: ExplorerAgentPatternMatcher()
+        )
     }
 
     private func worktree(

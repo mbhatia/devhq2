@@ -17,8 +17,9 @@ final class BuiltInCommandsTests: XCTestCase {
 
         XCTAssertEqual(Set(manager.commandsByID.keys), [
             "worktree:add-repo", "file:new", "file:new-dir", "file:close",
-            "terminal:new", "terminal:close"
+            "terminal:new", "terminal:close", "agent:create"
         ])
+        XCTAssertEqual(manager.commandsByID["agent:create"]?.title, "agent: create")
         XCTAssertEqual(manager.commandsByID["worktree:add-repo"]?.title, "worktree: add repo")
         XCTAssertEqual(manager.commandsByID["file:new"]?.title, "file: new")
         XCTAssertEqual(manager.commandsByID["file:new-dir"]?.title, "file: new dir")
@@ -34,6 +35,7 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(manager.commandsByID["file:close"]?.viewKinds, [.document])
         XCTAssertEqual(manager.commandsByID["terminal:new"]?.viewKinds, Set(CommandViewKind.allCases))
         XCTAssertEqual(manager.commandsByID["terminal:close"]?.viewKinds, [.terminal])
+        XCTAssertEqual(manager.commandsByID["agent:create"]?.viewKinds, Set(CommandViewKind.allCases))
 
         for view in CommandViewKind.allCases {
             XCTAssertEqual(

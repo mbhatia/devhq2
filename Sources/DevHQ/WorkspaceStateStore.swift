@@ -14,6 +14,42 @@ struct PersistedWorktreeState: Codable, Equatable {
     let isMain: Bool
     let isExpanded: Bool
     let isSelected: Bool
+    let agents: [PersistedAgentState]
+
+    init(
+        branchName: String,
+        path: String,
+        isMain: Bool,
+        isExpanded: Bool,
+        isSelected: Bool,
+        agents: [PersistedAgentState] = []
+    ) {
+        self.branchName = branchName
+        self.path = path
+        self.isMain = isMain
+        self.isExpanded = isExpanded
+        self.isSelected = isSelected
+        self.agents = agents
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case branchName
+        case path
+        case isMain
+        case isExpanded
+        case isSelected
+        case agents
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        branchName = try container.decode(String.self, forKey: .branchName)
+        path = try container.decode(String.self, forKey: .path)
+        isMain = try container.decode(Bool.self, forKey: .isMain)
+        isExpanded = try container.decode(Bool.self, forKey: .isExpanded)
+        isSelected = try container.decode(Bool.self, forKey: .isSelected)
+        agents = try container.decodeIfPresent([PersistedAgentState].self, forKey: .agents) ?? []
+    }
 }
 
 struct PersistedWorkspaceState: Codable, Equatable {

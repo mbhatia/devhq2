@@ -129,6 +129,16 @@ final class TerminalSession: ObservableObject, Identifiable {
     @Published private(set) var currentDirectory: URL
     @Published private(set) var exitStatus: Int?
     @Published private(set) var snapshot = TerminalRenderSnapshot.empty
+    /// Called once when the child process exits without the session being explicitly closed.
+    var onNaturalExit: ((Int) -> Void)? {
+        didSet { deliverNaturalExitIfNeeded() }
+    }
+    /// Called when the terminal emits BEL or an OSC notification.
+    var onAttention: (() -> Void)?
+    /// Called when this terminal gains keyboard focus.
+    var onFocus: (() -> Void)?
+    /// Called for text, key, or paste input originating in the terminal view.
+    var onUserInput: (() -> Void)?
     private var nativeHandle: OpaquePointer?
     private var timer: Timer?
     private var parser = TerminalParser(columns: 80, rows: 24)
@@ -137,6 +147,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     private var lastNotificationDate = Date.distantPast
     private var active = true
     private var closed = false
+    private var naturalExitDelivered = false
 
     init(
         rootURL: URL,
@@ -200,6 +211,11 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     var hasExited: Bool { exitStatus != nil }
 
+    /// The currently visible terminal rows, independent of whether the session is active.
+    var visibleText: String {
+        Self.plainText(from: makeGhosttySnapshot() ?? parser.snapshot())
+    }
+
     func setActive(_ isActive: Bool) {
         active = isActive
         if isActive { publishParserState() }
@@ -209,11 +225,23 @@ final class TerminalSession: ObservableObject, Identifiable {
         send(bytes: Array(text.utf8))
     }
 
+    func sendUser(text: String) {
+        guard !text.isEmpty else { return }
+        onUserInput?()
+        send(text: text)
+    }
+
     func send(bytes: [UInt8]) {
         guard let nativeHandle, !bytes.isEmpty, exitStatus == nil else { return }
         bytes.withUnsafeBufferPointer {
             _ = devhq_terminal_write(nativeHandle, $0.baseAddress, $0.count)
         }
+    }
+
+    func sendUser(bytes: [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        onUserInput?()
+        send(bytes: bytes)
     }
 
     func sendSpecialKey(_ key: TerminalSpecialKey, modifiers: NSEvent.ModifierFlags) {
@@ -249,6 +277,11 @@ final class TerminalSession: ObservableObject, Identifiable {
         send(bytes: bytes)
     }
 
+    func sendUserSpecialKey(_ key: TerminalSpecialKey, modifiers: NSEvent.ModifierFlags) {
+        onUserInput?()
+        sendSpecialKey(key, modifiers: modifiers)
+    }
+
     func paste(_ string: String) {
         if let nativeHandle, devhq_terminal_uses_ghostty() {
             let encoded = string.utf8CString
@@ -267,7 +300,14 @@ final class TerminalSession: ObservableObject, Identifiable {
         send(text: text)
     }
 
+    func pasteFromUser(_ string: String) {
+        guard !string.isEmpty else { return }
+        onUserInput?()
+        paste(string)
+    }
+
     func setFocused(_ focused: Bool) {
+        if focused { onFocus?() }
         if let nativeHandle, devhq_terminal_uses_ghostty(),
            devhq_terminal_focus(nativeHandle, focused) { return }
         guard parser.focusReporting else { return }
@@ -352,7 +392,10 @@ final class TerminalSession: ObservableObject, Identifiable {
         }
         for effect in parser.takeEffects() {
             switch effect {
+            case .bell:
+                onAttention?()
             case let .notification(title, body):
+                onAttention?()
                 pendingNotification = (title, body)
             case let .clipboardWrite(string):
                 hostServices.writeClipboard(string)
@@ -364,6 +407,7 @@ final class TerminalSession: ObservableObject, Identifiable {
             if devhq_terminal_poll_exit(nativeHandle, &status) {
                 exitStatus = Int(status)
                 changed = true
+                deliverNaturalExitIfNeeded()
             }
         }
         if title != parser.title { title = parser.title }
@@ -389,6 +433,19 @@ final class TerminalSession: ObservableObject, Identifiable {
         } else {
             snapshot = parser.snapshot()
         }
+    }
+
+    private func deliverNaturalExitIfNeeded() {
+        guard !closed, !naturalExitDelivered, let exitStatus, let onNaturalExit else { return }
+        naturalExitDelivered = true
+        onNaturalExit(exitStatus)
+    }
+
+    private static func plainText(from snapshot: TerminalRenderSnapshot) -> String {
+        snapshot.cells.map { row in
+            row.map(\.text).joined()
+                .replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression)
+        }.joined(separator: "\n")
     }
 
     private func hyperlink(at point: (column: Int, row: Int)) -> URL? {
@@ -503,6 +560,7 @@ enum TerminalSpecialKey: Int32 {
 }
 
 enum TerminalEffect: Equatable {
+    case bell
     case notification(title: String, body: String)
     case clipboardWrite(String)
 }
@@ -551,6 +609,7 @@ struct TerminalParser {
                     continue
                 }
                 switch byte {
+                case 0x07: flushPrintable(); enqueue(.bell)
                 case 0x1b: flushPrintable(); state = .escape
                 case 0x9d: flushPrintable(); startOSC()
                 case 0x0d: flushPrintable(); column = 0
@@ -836,7 +895,8 @@ struct TerminalParser {
     private mutating func enqueue(_ effect: TerminalEffect) {
         let matchingIndex = pendingEffects.firstIndex {
             switch ($0, effect) {
-            case (.notification, .notification), (.clipboardWrite, .clipboardWrite): true
+            case (.bell, .bell), (.notification, .notification),
+                 (.clipboardWrite, .clipboardWrite): true
             default: false
             }
         }

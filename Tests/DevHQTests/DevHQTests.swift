@@ -103,7 +103,7 @@ final class DevHQTests: XCTestCase {
         local devhq = require "devhq"
         local required_config = require "config"
         local layout = require "plugins.layout"
-        assert(devhq.core.api_version == "0.3")
+        assert(devhq.core.api_version == "0.4")
         assert(required_config == config)
         assert(config == devhq.config)
         assert(config.git.worktree_path == ".worktrees")

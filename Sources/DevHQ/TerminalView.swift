@@ -163,23 +163,23 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         }
         if flags.contains(.control), let character = event.charactersIgnoringModifiers?.lowercased().first,
            let ascii = character.asciiValue, ascii >= 0x40, ascii <= 0x7f {
-            session.send(bytes: [ascii & 0x1f])
+            session.sendUser(bytes: [ascii & 0x1f])
             return
         }
         switch event.keyCode {
-        case 126: session.sendSpecialKey(.up, modifiers: flags)
-        case 125: session.sendSpecialKey(.down, modifiers: flags)
-        case 124: session.sendSpecialKey(.right, modifiers: flags)
-        case 123: session.sendSpecialKey(.left, modifiers: flags)
-        case 115: session.sendSpecialKey(.home, modifiers: flags)
-        case 119: session.sendSpecialKey(.end, modifiers: flags)
-        case 116: session.sendSpecialKey(.pageUp, modifiers: flags)
-        case 121: session.sendSpecialKey(.pageDown, modifiers: flags)
-        case 117: session.sendSpecialKey(.delete, modifiers: flags)
-        case 51: session.sendSpecialKey(.backspace, modifiers: flags)
-        case 48: session.sendSpecialKey(.tab, modifiers: flags)
-        case 36, 76: session.sendSpecialKey(.returnKey, modifiers: flags)
-        case 53: session.sendSpecialKey(.escape, modifiers: flags)
+        case 126: session.sendUserSpecialKey(.up, modifiers: flags)
+        case 125: session.sendUserSpecialKey(.down, modifiers: flags)
+        case 124: session.sendUserSpecialKey(.right, modifiers: flags)
+        case 123: session.sendUserSpecialKey(.left, modifiers: flags)
+        case 115: session.sendUserSpecialKey(.home, modifiers: flags)
+        case 119: session.sendUserSpecialKey(.end, modifiers: flags)
+        case 116: session.sendUserSpecialKey(.pageUp, modifiers: flags)
+        case 121: session.sendUserSpecialKey(.pageDown, modifiers: flags)
+        case 117: session.sendUserSpecialKey(.delete, modifiers: flags)
+        case 51: session.sendUserSpecialKey(.backspace, modifiers: flags)
+        case 48: session.sendUserSpecialKey(.tab, modifiers: flags)
+        case 36, 76: session.sendUserSpecialKey(.returnKey, modifiers: flags)
+        case 53: session.sendUserSpecialKey(.escape, modifiers: flags)
         default: interpretKeyEvents([event])
         }
     }
@@ -309,13 +309,13 @@ final class NativeTerminalView: NSView, NSTextInputClient {
 
     private func pasteFromClipboard() {
         guard let string = NSPasteboard.general.string(forType: .string) else { return }
-        guard string.contains("\n") else { session.paste(string); return }
+        guard string.contains("\n") else { session.pasteFromUser(string); return }
         let alert = NSAlert()
         alert.messageText = "Paste multiple lines?"
         alert.informativeText = "The pasted text may execute more than one command."
         alert.addButton(withTitle: "Paste")
         alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn { session.paste(string) }
+        if alert.runModal() == .alertFirstButtonReturn { session.pasteFromUser(string) }
     }
 
     // MARK: NSTextInputClient
@@ -323,7 +323,7 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
         let value = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
         markedText = NSMutableAttributedString()
-        session.send(text: value)
+        session.sendUser(text: value)
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {

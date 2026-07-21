@@ -4,6 +4,14 @@ import XCTest
 @testable import DevHQ
 
 final class TerminalSessionTests: XCTestCase {
+    func testBELProducesAttentionEffect() {
+        var parser = TerminalParser(columns: 20, rows: 2)
+        parser.feed(Array("before\u{7}after".utf8))
+
+        XCTAssertEqual(parser.takeEffects(), [.bell])
+        XCTAssertTrue(parser.snapshot().cells[0].map(\.text).joined().contains("beforeafter"))
+    }
+
     func testOSC8HyperlinksSurviveSGRAndEndExplicitly() {
         var parser = TerminalParser(columns: 20, rows: 2)
         parser.feed(Array("\u{1B}]8;id=docs;https://example.com/docs\u{1B}\\A\u{1B}[0mB\u{1B}]8;;\u{7}C".utf8))
@@ -115,6 +123,87 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(session.exitStatus, 7)
         XCTAssertTrue(session.displayTitle.contains("exit 7"))
         XCTAssertTrue(session.snapshot.cells.flatMap { $0 }.map(\.text).joined().contains("hello"))
+    }
+
+    @MainActor
+    func testNaturalExitCallbackFiresExactlyOnceButExplicitCloseDoesNotFireIt() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let natural = try TerminalSession(
+            rootURL: root,
+            command: ["/bin/sh", "-c", "exit 23"]
+        )
+        var statuses: [Int] = []
+        natural.onNaturalExit = { statuses.append($0) }
+
+        let deadline = Date().addingTimeInterval(3)
+        while statuses.isEmpty, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        XCTAssertEqual(statuses, [23])
+        natural.close()
+        XCTAssertEqual(statuses, [23])
+
+        let explicitlyClosed = try TerminalSession(
+            rootURL: root,
+            command: ["/bin/sh", "-c", "sleep 10"]
+        )
+        var explicitStatuses: [Int] = []
+        explicitlyClosed.onNaturalExit = { explicitStatuses.append($0) }
+        explicitlyClosed.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertTrue(explicitStatuses.isEmpty)
+    }
+
+    @MainActor
+    func testAttentionFocusAndUserInputHooksDistinguishProgrammaticInput() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = RecordingTerminalHostServices()
+        let session = try TerminalSession(rootURL: root, shell: "/bin/sh", hostServices: host)
+        defer { session.close() }
+        var attentionCount = 0
+        var focusCount = 0
+        var userInputCount = 0
+        session.onAttention = { attentionCount += 1 }
+        session.onFocus = { focusCount += 1 }
+        session.onUserInput = { userInputCount += 1 }
+
+        session.send(text: "printf '\\007\\033]9;attention\\007'; sleep 1\n")
+        let deadline = Date().addingTimeInterval(3)
+        while attentionCount < 2, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+
+        XCTAssertEqual(attentionCount, 2)
+        XCTAssertEqual(userInputCount, 0)
+        session.setFocused(true)
+        session.sendUser(text: "echo user\n")
+        session.sendUserSpecialKey(.escape, modifiers: [])
+        session.pasteFromUser("paste")
+        XCTAssertEqual(focusCount, 1)
+        XCTAssertEqual(userInputCount, 3)
+    }
+
+    @MainActor
+    func testVisibleTextUpdatesWhileSessionIsInactive() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(rootURL: root, shell: "/bin/sh")
+        defer { session.close() }
+        session.setActive(false)
+        session.send(text: "printf 'inactive-visible-text'; sleep 1\n")
+
+        let deadline = Date().addingTimeInterval(3)
+        while !session.visibleText.contains("inactive-visible-text"), Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+
+        XCTAssertTrue(session.visibleText.contains("inactive-visible-text"))
+        XCTAssertFalse(session.snapshot.cells.flatMap { $0 }.map(\.text).joined()
+            .contains("inactive-visible-text"))
     }
 
     @MainActor

@@ -22,6 +22,7 @@ struct DevHQApp: App {
     @StateObject private var workspace: WorkspaceModel
     @StateObject private var worktreeExplorer: WorktreeExplorerModel
     @StateObject private var plugins: LuaPluginHost
+    @StateObject private var agentManager: AgentManager
     @StateObject private var layout: WorkspaceLayoutModel
     private static var snapshotWindow: NSWindow?
 
@@ -32,6 +33,11 @@ struct DevHQApp: App {
         let stateStore = WorkspaceStateStore()
         let workspace = WorkspaceModel(stateStore: stateStore)
         let plugins = LuaPluginHost(commandManager: commandManager, workspace: workspace)
+        let agentManager = AgentManager(
+            workspace: workspace,
+            profiles: plugins.agentProfileRegistry,
+            patternMatcher: plugins
+        )
         let worktreeService = LibGit2WorktreeService()
         let worktreeExplorer = WorktreeExplorerModel(
             discoverer: worktreeService,
@@ -49,6 +55,14 @@ struct DevHQApp: App {
                     url: worktree.url
                 )
             },
+            agentManager: agentManager,
+            onActivateAgent: { agent, repository, worktree in
+                try agentManager.activate(
+                    agent.key,
+                    repository: repository,
+                    worktree: worktree
+                )
+            },
             stateStore: stateStore
         )
         registerBuiltInContextMenus(
@@ -62,7 +76,9 @@ struct DevHQApp: App {
             try registerBuiltInCommands(
                 in: commandManager,
                 workspace: workspace,
-                worktreeExplorer: worktreeExplorer
+                worktreeExplorer: worktreeExplorer,
+                agentManager: agentManager,
+                agentProfiles: plugins.agentProfileRegistry
             )
         } catch {
             plugins.settings.pluginError =
@@ -83,8 +99,10 @@ struct DevHQApp: App {
         _workspace = StateObject(wrappedValue: workspace)
         _worktreeExplorer = StateObject(wrappedValue: worktreeExplorer)
         _plugins = StateObject(wrappedValue: plugins)
+        _agentManager = StateObject(wrappedValue: agentManager)
         _layout = StateObject(wrappedValue: layout)
         applicationDelegate.terminationHandler = {
+            agentManager.prepareForTermination()
             workspace.saveCurrentWorkspaceState()
             workspace.closeAllTerminals()
         }
