@@ -10,6 +10,9 @@ BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.github.mbhatia.devhq}"
 VOLUME_NAME="${VOLUME_NAME:-DevHQ}"
 ARCH="${ARCH:-$(uname -m)}"
 OUTPUT_DMG="${OUTPUT_DMG:-$DIST_DIR/DevHQ-macos-$ARCH.dmg}"
+CODESIGN="${CODESIGN:-0}"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+CODESIGN_OPTIONS="${CODESIGN_OPTIONS:-}"
 
 APP_NAME="DevHQ"
 APP_BUNDLE="$WORK_DIR/$APP_NAME.app"
@@ -46,6 +49,9 @@ Environment overrides:
   WORK_DIR             Temporary staging directory; default: $WORK_DIR
   OUTPUT_DMG            DMG output path; default: $OUTPUT_DMG
   VOLUME_NAME          Mounted DMG name; default: $VOLUME_NAME
+  CODESIGN             Sign the app: 1 or 0; default: $CODESIGN
+  SIGN_IDENTITY        codesign identity; default: - (ad-hoc)
+  CODESIGN_OPTIONS     Extra codesign arguments, such as --options runtime --timestamp
 USAGE
 }
 
@@ -64,6 +70,10 @@ case "$ARCH" in
   arm64|x86_64) ;;
   *) die "unsupported ARCH '$ARCH' (expected arm64 or x86_64)" ;;
 esac
+case "$CODESIGN" in
+  0|1) ;;
+  *) die "CODESIGN must be 0 or 1" ;;
+esac
 case "$VERSION" in
   ''|*[!0-9.]*) die "VERSION must contain only digits and periods" ;;
 esac
@@ -73,11 +83,15 @@ esac
 [ "$BUILD_NUMBER" -gt 0 ] || die "BUILD_NUMBER must be a positive integer"
 
 need_cmd ditto
+need_cmd file
+need_cmd find
+need_cmd grep
 need_cmd hdiutil
 need_cmd nm
 need_cmd otool
 need_cmd plutil
 need_cmd swift
+[ "$CODESIGN" = "0" ] || need_cmd codesign
 
 [ -f "$SCRIPT_DIR/assets/DevHQ.icns" ] || die "missing app icon: assets/DevHQ.icns"
 [ -f "$SCRIPT_DIR/assets/Lua-LICENSE.txt" ] || die "missing Lua license: assets/Lua-LICENSE.txt"
@@ -85,6 +99,39 @@ need_cmd swift
 [ -f "$SCRIPT_DIR/LICENSE" ] || die "missing DevHQ license"
 [ -f "$SCRIPT_DIR/Vendor/ghostty/LICENSE" ] || die "missing Ghostty license; initialize the Ghostty submodule"
 [ -d "$SCRIPT_DIR/ghostty-vt.xcframework" ] || die "missing ghostty-vt.xcframework; run ./Scripts/bootstrap-ghostty.sh"
+
+patch_codeeditlanguages_resource_lookup() {
+  local source="$SCRIPT_DIR/.build/checkouts/CodeEditLanguages/Sources/CodeEditLanguages/CodeLanguage.swift"
+  local original='    internal var resourceURL: URL? = Bundle.module.resourceURL'
+  local patched='    internal var resourceURL: URL? = Bundle.main.resourceURL.flatMap { let bundleURL = $0.appendingPathComponent("CodeEditLanguages_CodeEditLanguages.bundle", isDirectory: true); return Bundle(url: bundleURL) == nil ? nil : bundleURL } ?? Bundle.module.bundleURL'
+  local original_count patched_count temporary
+
+  [ -f "$source" ] || die "CodeEditLanguages 0.1.20 source was not resolved at $source"
+  original_count="$(grep -Fxc "$original" "$source" || true)"
+  patched_count="$(grep -Fxc "$patched" "$source" || true)"
+  case "$original_count:$patched_count" in
+    1:0)
+      temporary="$source.devhq-patched"
+      awk -v original="$original" -v patched="$patched" \
+        '$0 == original { print patched; next } { print }' "$source" > "$temporary"
+      chmod 644 "$temporary"
+      mv "$temporary" "$source"
+      ;;
+    0:1)
+      # A repeated installer build can reuse the already-patched checkout.
+      touch "$source"
+      ;;
+    *)
+      die "CodeEditLanguages resource lookup did not match pinned 0.1.20; refusing an unsafe source patch"
+      ;;
+  esac
+  [ "$(grep -Fxc "$patched" "$source" || true)" = "1" ] || \
+    die "failed to patch CodeEditLanguages resource lookup"
+}
+
+log "Resolving Swift package dependencies..."
+swift package --package-path "$SCRIPT_DIR" resolve
+patch_codeeditlanguages_resource_lookup
 
 log "Building release DevHQ for $ARCH..."
 swift build --package-path "$SCRIPT_DIR" -c release --arch "$ARCH" --product DevHQ
@@ -110,16 +157,17 @@ ditto "$EXECUTABLE" "$MACOS_DIR/DevHQ"
 chmod 755 "$MACOS_DIR/DevHQ"
 ditto "$SCRIPT_DIR/assets/DevHQ.icns" "$RESOURCES_DIR/DevHQ.icns"
 
-# SwiftPM's generated Bundle.module accessors look beside Bundle.main.bundleURL.
-# In a native app that is the .app root, not Contents/Resources.
+# Keep SwiftPM resources in the canonical signed-app resource location. The
+# patched CodeEditLanguages dependency and DevHQ's terminfo lookup prefer this
+# path, while falling back to Bundle.module for `swift run` and tests.
 bundle_count=0
 while IFS= read -r -d '' resource_bundle; do
-  ditto "$resource_bundle" "$APP_BUNDLE/$(basename "$resource_bundle")"
+  ditto "$resource_bundle" "$RESOURCES_DIR/$(basename "$resource_bundle")"
   bundle_count=$((bundle_count + 1))
 done < <(find "$BIN_DIR" -maxdepth 1 -type d -name '*.bundle' -print0)
 [ "$bundle_count" -gt 0 ] || die "no SwiftPM resource bundles were produced"
-[ -d "$APP_BUNDLE/DevHQ_DevHQ.bundle" ] || die "DevHQ resource bundle was not staged at the app root"
-[ -d "$APP_BUNDLE/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "CodeEditLanguages resource bundle was not staged at the app root"
+[ -d "$RESOURCES_DIR/DevHQ_DevHQ.bundle" ] || die "DevHQ resource bundle was not staged in Contents/Resources"
+[ -d "$RESOURCES_DIR/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "CodeEditLanguages resource bundle was not staged in Contents/Resources"
 
 ditto "$SCRIPT_DIR/LICENSE" "$LEGAL_DIR/DevHQ-LICENSE.txt"
 ditto "$SCRIPT_DIR/assets/Lua-LICENSE.txt" "$LEGAL_DIR/Lua-LICENSE.txt"
@@ -164,7 +212,33 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 PLIST
 plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
 
-log "Leaving the local development app unsigned."
+codesign_path() {
+  local path="$1"
+  local args=(--force)
+  local extra_args=()
+  if [ -n "$CODESIGN_OPTIONS" ]; then
+    read -r -a extra_args <<< "$CODESIGN_OPTIONS"
+    args+=("${extra_args[@]}")
+  fi
+  codesign "${args[@]}" --sign "$SIGN_IDENTITY" "$path" >/dev/null
+}
+
+if [ "$CODESIGN" = "1" ]; then
+  log "Signing nested Mach-O payloads..."
+  # Sign individual native payloads before sealing the enclosing app. Do not
+  # use --deep for signing: every native payload is handled explicitly.
+  while IFS= read -r -d '' native_path; do
+    if file "$native_path" | grep -q 'Mach-O'; then
+      codesign_path "$native_path"
+    fi
+  done < <(find "$CONTENTS_DIR" -type f -print0)
+
+  log "Signing $APP_BUNDLE..."
+  codesign_path "$APP_BUNDLE"
+  codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" >/dev/null
+else
+  log "Leaving the local development app unsigned (CODESIGN=0)."
+fi
 
 if [ "$STAGE_ONLY" -eq 1 ]; then
   log "Created staged app: $APP_BUNDLE"
@@ -190,8 +264,8 @@ MOUNTED=1
 [ -x "$MOUNT_DIR/DevHQ.app/Contents/MacOS/DevHQ" ] || die "mounted DMG is missing the DevHQ executable"
 [ -L "$MOUNT_DIR/Applications" ] || die "mounted DMG is missing the Applications symlink"
 [ "$(readlink "$MOUNT_DIR/Applications")" = "/Applications" ] || die "mounted DMG has an invalid Applications symlink"
-[ -d "$MOUNT_DIR/DevHQ.app/DevHQ_DevHQ.bundle" ] || die "mounted DMG is missing DevHQ resources"
-[ -d "$MOUNT_DIR/DevHQ.app/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "mounted DMG is missing CodeEditLanguages resources"
+[ -d "$MOUNT_DIR/DevHQ.app/Contents/Resources/DevHQ_DevHQ.bundle" ] || die "mounted DMG is missing DevHQ resources"
+[ -d "$MOUNT_DIR/DevHQ.app/Contents/Resources/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "mounted DMG is missing CodeEditLanguages resources"
 [ -f "$MOUNT_DIR/DevHQ.app/Contents/Resources/DevHQ.icns" ] || die "mounted DMG is missing the app icon"
 for legal_file in DevHQ-LICENSE.txt Ghostty-LICENSE.txt Lua-LICENSE.txt LuaSwift-LICENSE.txt THIRD-PARTY-NOTICES.md; do
   [ -f "$MOUNT_DIR/DevHQ.app/Contents/Resources/legal/$legal_file" ] || die "mounted DMG is missing $legal_file"

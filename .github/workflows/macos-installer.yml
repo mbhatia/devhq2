@@ -1,0 +1,253 @@
+name: Build macOS installer
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build DevHQ macOS arm64 DMG
+    runs-on: macos-15
+    steps:
+      - name: Checkout DevHQ
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.15.2
+
+      - name: Bootstrap Ghostty
+        run: ./Scripts/bootstrap-ghostty.sh
+
+      - name: Set build metadata
+        shell: bash
+        run: |
+          version=0.1.0
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ ! "$version" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+              echo "error: release tag must be v followed by a numeric dotted version" >&2
+              exit 1
+            fi
+          fi
+
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Configure ad-hoc signing
+        if: github.event_name == 'pull_request'
+        run: |
+          echo 'SIGN_IDENTITY=-' >> "$GITHUB_ENV"
+          echo 'CODESIGN_OPTIONS=' >> "$GITHUB_ENV"
+
+      - name: Import Developer ID certificate
+        if: github.event_name != 'pull_request'
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+        shell: bash
+        run: |
+          for name in \
+            APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_KEYCHAIN_PASSWORD \
+            APPLE_SIGN_IDENTITY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "error: $name is required for manual and tagged builds" >&2
+              exit 1
+            fi
+          done
+
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/devhq-signing.keychain-db"
+          echo "CERTIFICATE_PATH=$certificate_path" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          umask 077
+          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | /usr/bin/base64 -D > "$certificate_path"
+
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$APPLE_KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F "$APPLE_SIGN_IDENTITY"
+
+          echo "SIGN_IDENTITY=$APPLE_SIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo 'CODESIGN_OPTIONS=--options runtime --timestamp' >> "$GITHUB_ENV"
+
+      - name: Build signed installer
+        env:
+          ARCH: arm64
+          CODESIGN: "1"
+        run: ./build_installer.sh
+
+      - name: Sign DMG
+        shell: bash
+        run: |
+          dmg="dist/DevHQ-macos-arm64.dmg"
+          test -f "$dmg"
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            codesign --force --sign - "$dmg"
+          else
+            codesign --force --sign "$SIGN_IDENTITY" --timestamp "$dmg"
+          fi
+          codesign --verify --strict --verbose=2 "$dmg"
+
+      - name: Notarize, staple, and validate DMG
+        if: github.event_name != 'pull_request'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        shell: bash
+        run: |
+          for name in APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "error: $name is required for manual and tagged builds" >&2
+              exit 1
+            fi
+          done
+
+          dmg="dist/DevHQ-macos-arm64.dmg"
+          notary_result="$RUNNER_TEMP/notary-result.json"
+          set +e
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait \
+            --output-format json > "$notary_result"
+          notary_exit=$?
+          set -e
+
+          cat "$notary_result"
+          submission_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id", ""))' "$notary_result")"
+          status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$notary_result")"
+          if [[ "$notary_exit" -ne 0 || "$status" != "Accepted" ]]; then
+            if [[ -n "$submission_id" ]]; then
+              xcrun notarytool log "$submission_id" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_APP_SPECIFIC_PASSWORD" || true
+            fi
+            exit 1
+          fi
+
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature -vv "$dmg"
+
+      - name: Verify mounted app
+        shell: bash
+        run: |
+          dmg="dist/DevHQ-macos-arm64.dmg"
+          hdiutil verify "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rmdir "$mount_dir" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+
+          app="$mount_dir/DevHQ.app"
+          test -x "$app/Contents/MacOS/DevHQ"
+          test -L "$mount_dir/Applications"
+          test "$(readlink "$mount_dir/Applications")" = /Applications
+          test -f "$app/Contents/Resources/DevHQ.icns"
+          test -d "$app/Contents/Resources/DevHQ_DevHQ.bundle"
+          test -d "$app/Contents/Resources/CodeEditLanguages_CodeEditLanguages.bundle"
+          test ! -e "$app/DevHQ_DevHQ.bundle"
+          test ! -e "$app/CodeEditLanguages_CodeEditLanguages.bundle"
+          for legal_file in \
+            DevHQ-LICENSE.txt \
+            Ghostty-LICENSE.txt \
+            Lua-LICENSE.txt \
+            LuaSwift-LICENSE.txt \
+            THIRD-PARTY-NOTICES.md
+          do
+            test -f "$app/Contents/Resources/legal/$legal_file"
+          done
+
+          codesign --verify --deep --strict --verbose=2 "$app"
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            spctl --assess --type execute -vv "$app"
+          fi
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: DevHQ-macos-arm64
+          path: dist/DevHQ-macos-arm64.dmg
+          if-no-files-found: error
+
+      - name: Remove temporary signing keychain
+        if: always() && github.event_name != 'pull_request'
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          fi
+          if [[ -n "${CERTIFICATE_PATH:-}" ]]; then
+            rm -f "$CERTIFICATE_PATH"
+          fi
+
+  release:
+    name: Publish GitHub release asset
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: DevHQ-macos-arm64
+          path: release-artifact
+
+      - name: Publish GitHub release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          asset="release-artifact/DevHQ-macos-arm64.dmg"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset#DevHQ-macos-arm64.dmg" --clobber
+          else
+            gh release create "$tag" "$asset#DevHQ-macos-arm64.dmg" \
+              --verify-tag \
+              --generate-notes
+          fi
