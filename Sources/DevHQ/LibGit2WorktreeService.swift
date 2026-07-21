@@ -4,6 +4,13 @@ import Foundation
 enum LibGit2WorktreeError: LocalizedError {
     case notRepository(URL, String)
     case missingMainWorktree(URL)
+    case invalidBranchName(String)
+    case worktreePathExists(URL)
+    case branchAlreadyCheckedOut(String)
+    case ambiguousRemoteBranch(String, [String])
+    case worktreeNotFound(URL)
+    case cannotDeleteMainWorktree(URL)
+    case worktreeHasChanges(URL)
     case operationFailed(String)
 
     var errorDescription: String? {
@@ -12,13 +19,38 @@ enum LibGit2WorktreeError: LocalizedError {
             "Could not open a Git repository at \(url.path): \(detail)"
         case let .missingMainWorktree(url):
             "The Git repository at \(url.path) does not have a main worktree."
+        case let .invalidBranchName(branchName):
+            "'\(branchName)' is not a valid Git branch name."
+        case let .worktreePathExists(url):
+            "A file or directory already exists at \(url.path)."
+        case let .branchAlreadyCheckedOut(branchName):
+            "The branch '\(branchName)' is already checked out in another worktree."
+        case let .ambiguousRemoteBranch(branchName, remoteBranches):
+            "Multiple remote branches match '\(branchName)': \(remoteBranches.joined(separator: ", "))."
+        case let .worktreeNotFound(url):
+            "No Git worktree is registered at \(url.path)."
+        case let .cannotDeleteMainWorktree(url):
+            "The main worktree at \(url.path) cannot be deleted."
+        case let .worktreeHasChanges(url):
+            "The worktree at \(url.path) has staged, unstaged, untracked, or conflicted changes."
         case let .operationFailed(detail):
             detail
         }
     }
 }
 
-final class LibGit2WorktreeService: GitWorktreeDiscovering {
+protocol GitWorktreeManaging {
+    @discardableResult
+    func createWorktree(
+        in repositoryURL: URL,
+        branchName: String,
+        at worktreeURL: URL
+    ) throws -> GitWorktreeInfo
+
+    func deleteWorktree(in repositoryURL: URL, at worktreeURL: URL) throws
+}
+
+final class LibGit2WorktreeService: GitWorktreeDiscovering, GitWorktreeManaging {
     private static let initializationError: LibGit2WorktreeError? = {
         let initializationResult = git_libgit2_init()
         guard initializationResult >= 0 else {
@@ -128,6 +160,209 @@ final class LibGit2WorktreeService: GitWorktreeDiscovering {
             name: mainWorktreeURL.lastPathComponent,
             gitDirectoryURL: commonDirectoryURL,
             worktrees: worktrees
+        )
+    }
+
+    @discardableResult
+    func createWorktree(
+        in repositoryURL: URL,
+        branchName: String,
+        at worktreeURL: URL
+    ) throws -> GitWorktreeInfo {
+        let repositoryURL = normalizedFileURL(repositoryURL.path)
+        let worktreeURL = normalizedFileURL(worktreeURL.path)
+
+        try validateRepository(at: repositoryURL)
+        try validateBranchName(branchName, in: repositoryURL)
+
+        guard !FileManager.default.fileExists(atPath: worktreeURL.path) else {
+            throw LibGit2WorktreeError.worktreePathExists(worktreeURL)
+        }
+
+        let worktreeList = try gitOutput(
+            ["-C", repositoryURL.path, "worktree", "list", "--porcelain"],
+            operation: "List Git worktrees"
+        )
+        if worktreeList.split(separator: "\n").contains("branch refs/heads/\(branchName)"[...]) {
+            throw LibGit2WorktreeError.branchAlreadyCheckedOut(branchName)
+        }
+
+        let branchExists = try localBranchExists(branchName, in: repositoryURL)
+        let arguments: [String]
+        if branchExists {
+            arguments = [
+                "-C", repositoryURL.path,
+                "worktree", "add", worktreeURL.path, branchName
+            ]
+        } else {
+            let remoteBranches = try matchingRemoteBranches(
+                branchName,
+                in: repositoryURL
+            )
+            guard remoteBranches.count <= 1 else {
+                throw LibGit2WorktreeError.ambiguousRemoteBranch(
+                    branchName,
+                    remoteBranches
+                )
+            }
+            if let remoteBranch = remoteBranches.first {
+                arguments = [
+                    "-C", repositoryURL.path,
+                    "worktree", "add", "--track", "-b", branchName,
+                    worktreeURL.path, remoteBranch
+                ]
+            } else {
+                arguments = [
+                    "-C", repositoryURL.path,
+                    "worktree", "add", "-b", branchName, worktreeURL.path, "HEAD"
+                ]
+            }
+        }
+        _ = try gitOutput(arguments, operation: "Create Git worktree")
+
+        return GitWorktreeInfo(name: branchName, url: worktreeURL, isMain: false)
+    }
+
+    func deleteWorktree(in repositoryURL: URL, at worktreeURL: URL) throws {
+        let repositoryURL = normalizedFileURL(repositoryURL.path)
+        let worktreeURL = normalizedFileURL(worktreeURL.path)
+
+        try validateRepository(at: repositoryURL)
+        let entries = parseWorktreePaths(
+            try gitOutput(
+                ["-C", repositoryURL.path, "worktree", "list", "--porcelain"],
+                operation: "List Git worktrees"
+            )
+        )
+        guard let mainWorktreeURL = entries.first else {
+            throw LibGit2WorktreeError.missingMainWorktree(repositoryURL)
+        }
+        guard entries.contains(worktreeURL) else {
+            throw LibGit2WorktreeError.worktreeNotFound(worktreeURL)
+        }
+        guard worktreeURL != mainWorktreeURL else {
+            throw LibGit2WorktreeError.cannotDeleteMainWorktree(worktreeURL)
+        }
+
+        let status = try gitOutput(
+            [
+                "-C", worktreeURL.path,
+                "status", "--porcelain=v1", "--untracked-files=all", "--ignored=no"
+            ],
+            operation: "Check Git worktree status"
+        )
+        guard status.isEmpty else {
+            throw LibGit2WorktreeError.worktreeHasChanges(worktreeURL)
+        }
+
+        _ = try gitOutput(
+            ["-C", repositoryURL.path, "worktree", "remove", "--", worktreeURL.path],
+            operation: "Delete Git worktree"
+        )
+    }
+
+    private func validateRepository(at url: URL) throws {
+        let result = runGit(["-C", url.path, "rev-parse", "--git-dir"])
+        guard result.status == 0 else {
+            throw LibGit2WorktreeError.notRepository(url, result.output)
+        }
+    }
+
+    private func validateBranchName(_ branchName: String, in repositoryURL: URL) throws {
+        guard !branchName.isEmpty, !branchName.hasPrefix("-") else {
+            throw LibGit2WorktreeError.invalidBranchName(branchName)
+        }
+        let result = runGit([
+            "-C", repositoryURL.path,
+            "check-ref-format", "--branch", branchName
+        ])
+        guard result.status == 0 else {
+            throw LibGit2WorktreeError.invalidBranchName(branchName)
+        }
+    }
+
+    private func localBranchExists(_ branchName: String, in repositoryURL: URL) throws -> Bool {
+        let result = runGit([
+            "-C", repositoryURL.path,
+            "show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"
+        ])
+        switch result.status {
+        case 0:
+            return true
+        case 1:
+            return false
+        default:
+            throw LibGit2WorktreeError.operationFailed(
+                "Check Git branch '\(branchName)' failed: \(result.output)"
+            )
+        }
+    }
+
+    private func matchingRemoteBranches(
+        _ branchName: String,
+        in repositoryURL: URL
+    ) throws -> [String] {
+        let output = try gitOutput(
+            [
+                "-C", repositoryURL.path,
+                "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes"
+            ],
+            operation: "List remote Git branches"
+        )
+        let prefix = "refs/remotes/"
+        return output.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: " ")
+            guard fields.count == 1 else { return nil }
+            let reference = String(fields[0])
+            guard reference.hasPrefix(prefix) else { return nil }
+            let shortName = String(reference.dropFirst(prefix.count))
+            guard
+                let separator = shortName.firstIndex(of: "/"),
+                shortName[shortName.index(after: separator)...] == branchName
+            else { return nil }
+            return shortName
+        }
+    }
+
+    private func parseWorktreePaths(_ output: String) -> [URL] {
+        output.split(separator: "\n").compactMap { line in
+            let prefix = "worktree "
+            guard line.hasPrefix(prefix) else { return nil }
+            return normalizedFileURL(String(line.dropFirst(prefix.count)))
+        }
+    }
+
+    private func gitOutput(_ arguments: [String], operation: String) throws -> String {
+        let result = runGit(arguments)
+        guard result.status == 0 else {
+            let detail = result.output.isEmpty
+                ? "git exited with status \(result.status)"
+                : result.output
+            throw LibGit2WorktreeError.operationFailed("\(operation) failed: \(detail)")
+        }
+        return result.output
+    }
+
+    private func runGit(_ arguments: [String]) -> (status: Int32, output: String) {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = output
+
+        do {
+            try process.run()
+        } catch {
+            return (-1, error.localizedDescription)
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (
+            process.terminationStatus,
+            String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 

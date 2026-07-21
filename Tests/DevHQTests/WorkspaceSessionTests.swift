@@ -337,6 +337,164 @@ final class WorkspaceSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testUnsavedChangesQueryFindsDirtyDocumentInActiveWorkspace() throws {
+        let workspace = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let file = workspace.appendingPathComponent("Current.swift")
+        try "saved".write(to: file, atomically: true, encoding: .utf8)
+        let model = WorkspaceModel(arguments: ["DevHQ"])
+        model.openWorkspace(workspace)
+        model.openFile(file)
+
+        XCTAssertFalse(model.hasUnsavedChanges(inWorkspaceAt: workspace))
+
+        model.selectedDocument?.text = "unsaved"
+
+        let equivalentURL = workspace.appendingPathComponent("..")
+            .appendingPathComponent(workspace.lastPathComponent)
+        XCTAssertTrue(model.hasUnsavedChanges(inWorkspaceAt: equivalentURL))
+    }
+
+    @MainActor
+    func testUnsavedChangesQueryFindsDirtyDocumentInCachedWorkspaceOnly() throws {
+        let first = temporaryDirectory()
+        let second = temporaryDirectory()
+        let unrelated = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+            try? FileManager.default.removeItem(at: unrelated)
+        }
+        let firstFile = first.appendingPathComponent("First.swift")
+        let secondFile = second.appendingPathComponent("Second.swift")
+        try "first saved".write(to: firstFile, atomically: true, encoding: .utf8)
+        try "second saved".write(to: secondFile, atomically: true, encoding: .utf8)
+        let model = WorkspaceModel(arguments: ["DevHQ"])
+        model.openWorkspace(first)
+        model.openFile(firstFile)
+        model.selectedDocument?.text = "first unsaved"
+        model.openWorkspace(second)
+        model.openFile(secondFile)
+
+        XCTAssertTrue(model.hasUnsavedChanges(inWorkspaceAt: first))
+        XCTAssertFalse(model.hasUnsavedChanges(inWorkspaceAt: second))
+        XCTAssertFalse(model.hasUnsavedChanges(inWorkspaceAt: unrelated))
+    }
+
+    @MainActor
+    func testClosingActiveWorkspaceClearsVisibleAndPersistentIdentityState() throws {
+        let workspace = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let file = workspace.appendingPathComponent("Current.swift")
+        try "let current = true".write(to: file, atomically: true, encoding: .utf8)
+        let store = InMemoryWorkspaceStateStore()
+        let model = WorkspaceModel(arguments: ["DevHQ"], stateStore: store)
+        model.openWorktree(canonicalRepositoryName: "repo", worktreeName: "main", url: workspace)
+        model.openFile(file)
+
+        model.closeWorkspace(at: workspace.appendingPathComponent("..")
+            .appendingPathComponent(workspace.lastPathComponent))
+        model.saveCurrentWorkspaceState()
+
+        XCTAssertNil(model.rootURL)
+        XCTAssertTrue(model.fileTree.roots.isEmpty)
+        XCTAssertTrue(model.fileTree.expandedIDs.isEmpty)
+        XCTAssertTrue(model.documents.isEmpty)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertNil(model.selectedDocumentID)
+        XCTAssertNil(model.selectedTabID)
+        XCTAssertTrue(store.workspaceSaves.isEmpty)
+    }
+
+    @MainActor
+    func testClosingInactiveWorkspaceEvictsOnlyItsSession() throws {
+        let first = temporaryDirectory()
+        let second = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let firstFile = first.appendingPathComponent("First.swift")
+        let secondFile = second.appendingPathComponent("Second.swift")
+        try "first".write(to: firstFile, atomically: true, encoding: .utf8)
+        try "second".write(to: secondFile, atomically: true, encoding: .utf8)
+        let model = WorkspaceModel(arguments: ["DevHQ"])
+        model.openWorkspace(first)
+        model.openFile(firstFile)
+        model.openWorkspace(second)
+        model.openFile(secondFile)
+        let secondDocumentID = try XCTUnwrap(model.selectedDocumentID)
+
+        model.closeWorkspace(at: first)
+
+        XCTAssertEqual(model.rootURL, second.standardizedFileURL.resolvingSymlinksInPath())
+        XCTAssertEqual(model.documents.map(\.url), [secondFile])
+        XCTAssertEqual(model.selectedDocumentID, secondDocumentID)
+
+        model.openWorkspace(first)
+        XCTAssertTrue(model.tabs.isEmpty)
+        XCTAssertTrue(model.documents.isEmpty)
+    }
+
+    @MainActor
+    func testClosingWorkspacePreservesUnrelatedCachedSessions() throws {
+        let first = temporaryDirectory()
+        let second = temporaryDirectory()
+        let third = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+            try? FileManager.default.removeItem(at: third)
+        }
+        let firstFile = first.appendingPathComponent("First.swift")
+        let secondFile = second.appendingPathComponent("Second.swift")
+        let thirdFile = third.appendingPathComponent("Third.swift")
+        try "first".write(to: firstFile, atomically: true, encoding: .utf8)
+        try "second".write(to: secondFile, atomically: true, encoding: .utf8)
+        try "third".write(to: thirdFile, atomically: true, encoding: .utf8)
+        let model = WorkspaceModel(arguments: ["DevHQ"])
+        model.openWorkspace(first)
+        model.openFile(firstFile)
+        model.openWorkspace(second)
+        model.openFile(secondFile)
+        model.openWorkspace(third)
+        model.openFile(thirdFile)
+
+        model.closeWorkspace(at: second)
+
+        XCTAssertEqual(model.documents.map(\.url), [thirdFile])
+        model.openWorkspace(first)
+        XCTAssertEqual(model.documents.map(\.url), [firstFile])
+        model.openWorkspace(third)
+        XCTAssertEqual(model.documents.map(\.url), [thirdFile])
+        model.openWorkspace(second)
+        XCTAssertTrue(model.documents.isEmpty)
+    }
+
+    @MainActor
+    func testClosingWorkspaceClosesTerminalSharedByActiveAndCachedState() throws {
+        let first = temporaryDirectory()
+        let second = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let model = WorkspaceModel(arguments: ["DevHQ"])
+        model.openWorkspace(first)
+        let terminal = try model.newTerminal(shell: "/bin/sh")
+        let processID = terminal.processID
+        model.openWorkspace(second)
+        model.openWorkspace(first)
+
+        model.closeWorkspace(at: first)
+
+        XCTAssertEqual(kill(processID, 0), -1)
+        XCTAssertTrue(model.tabs.isEmpty)
+        model.openWorkspace(first)
+        XCTAssertTrue(model.tabs.isEmpty)
+    }
+
+    @MainActor
     func testExactExpansionRestoreKeepsOnlyCurrentBranches() {
         let nested = TreeNode(id: "nested", value: 2, children: [
             TreeNode(id: "leaf", value: 3, children: nil)

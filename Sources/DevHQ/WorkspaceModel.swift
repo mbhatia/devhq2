@@ -628,6 +628,59 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
+    /// Returns whether the active or cached editor session for a workspace
+    /// contains an unsaved document.
+    func hasUnsavedChanges(inWorkspaceAt url: URL) -> Bool {
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        if rootURL?.standardizedFileURL.resolvingSymlinksInPath() == url,
+           documents.contains(where: \.isDirty) {
+            return true
+        }
+        return editorSessions.contains { entry in
+            entry.key.standardizedFileURL.resolvingSymlinksInPath() == url
+                && entry.value.documents.contains(where: \.isDirty)
+        }
+    }
+
+    /// Discards the in-memory editor session for a workspace and terminates
+    /// any terminals owned by it. If the workspace is active, its visible
+    /// file and editor state is cleared as well.
+    func closeWorkspace(at url: URL) {
+        let url = url.standardizedFileURL.resolvingSymlinksInPath()
+        let cachedKeys = editorSessions.keys.filter {
+            $0.standardizedFileURL.resolvingSymlinksInPath() == url
+        }
+
+        var terminals: [TerminalSession] = []
+        for key in cachedKeys {
+            if let session = editorSessions.removeValue(forKey: key) {
+                terminals.append(contentsOf: session.tabs.compactMap(\.terminal))
+            }
+        }
+
+        let isActive = rootURL?
+            .standardizedFileURL
+            .resolvingSymlinksInPath() == url
+        if isActive {
+            terminals.append(contentsOf: tabs.compactMap(\.terminal))
+        }
+
+        var closedTerminalIDs = Set<UUID>()
+        for terminal in terminals where closedTerminalIDs.insert(terminal.id).inserted {
+            terminal.close()
+        }
+
+        guard isActive else { return }
+        rootURL = nil
+        fileTree.replaceRoots([])
+        documents = []
+        selectedDocumentID = nil
+        tabs = []
+        selectedTabID = nil
+        lastSelectedDocumentID = nil
+        persistentWorkspaceIdentity = nil
+    }
+
     func closeAllTerminals() {
         let activeTerminalID = selectedTerminal?.id
         for terminal in allTerminalSessions { terminal.close() }

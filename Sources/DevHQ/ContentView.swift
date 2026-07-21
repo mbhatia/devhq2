@@ -33,6 +33,7 @@ struct ContentView: View {
     @ObservedObject var commandManager: CommandManager
     @ObservedObject var commandPalette: CommandPaletteController
     @ObservedObject var commandContext: CommandContextTracker
+    @ObservedObject var contextMenuRegistry: ContextMenuRegistry
     var tracksLayoutChanges = true
     @State private var hasRestoredLayout = false
     @State private var layoutRestorationRequestID = 0
@@ -41,7 +42,11 @@ struct ContentView: View {
         ZStack {
             HSplitView {
                 if settings.treeViewVisible {
-                    WorktreeExplorerSidebar(explorer: worktreeExplorer, workspace: workspace)
+                    WorktreeExplorerSidebar(
+                        explorer: worktreeExplorer,
+                        workspace: workspace,
+                        contextMenuRegistry: contextMenuRegistry
+                    )
                         .frame(
                             minWidth: WorkspaceLayoutState.worktreeExplorerWidthRange.lowerBound,
                             idealWidth: layout.worktreeExplorerWidth,
@@ -75,7 +80,10 @@ struct ContentView: View {
                             }
                         }
 
-                    Sidebar(workspace: workspace)
+                    Sidebar(
+                        workspace: workspace,
+                        contextMenuRegistry: contextMenuRegistry
+                    )
                         .frame(
                             minWidth: WorkspaceLayoutState.fileExplorerWidthRange.lowerBound,
                             idealWidth: layout.fileExplorerWidth,
@@ -293,6 +301,7 @@ private struct PaneActivationMonitor: NSViewRepresentable {
 private struct WorktreeExplorerSidebar: View {
     @ObservedObject var explorer: WorktreeExplorerModel
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var contextMenuRegistry: ContextMenuRegistry
 
     var body: some View {
         VStack(spacing: 0) {
@@ -332,7 +341,18 @@ private struct WorktreeExplorerSidebar: View {
                     TreeView(
                         model: explorer.tree,
                         selectedID: explorer.selectedNodeID,
-                        onToggle: { node in explorer.toggle(node) }
+                        onToggle: { node in explorer.toggle(node) },
+                        contextMenuProvider: { node in
+                            guard let snapshot = worktreeContextMenuSnapshot(
+                                for: node,
+                                in: explorer
+                            ) else { return [] }
+                            return treeContextMenuEntries(
+                                for: snapshot,
+                                registry: contextMenuRegistry,
+                                onError: explorer.reportError
+                            )
+                        }
                     ) { node in
                         explorer.activate(node)
                     } rowContent: { node in
@@ -384,6 +404,7 @@ private struct WorktreeExplorerRow: View {
 
 private struct Sidebar: View {
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var contextMenuRegistry: ContextMenuRegistry
 
     var body: some View {
         VStack(spacing: 0) {
@@ -417,7 +438,15 @@ private struct Sidebar: View {
                 ScrollView {
                     TreeView(
                         model: workspace.fileTree,
-                        selectedID: workspace.selectedFileNodeID
+                        selectedID: workspace.selectedFileNodeID,
+                        contextMenuProvider: { node in
+                            treeContextMenuEntries(
+                                for: fileContextMenuSnapshot(for: node),
+                                registry: contextMenuRegistry
+                            ) { error in
+                                workspace.errorMessage = error.localizedDescription
+                            }
+                        }
                     ) { node in
                         workspace.open(node)
                     } rowContent: { node in

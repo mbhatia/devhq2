@@ -179,6 +179,10 @@ final class WorktreeExplorerModel: ObservableObject {
         errorMessage = nil
     }
 
+    func reportError(_ error: Error) {
+        errorMessage = error.localizedDescription
+    }
+
     func refreshAll() {
         var refreshedAny = false
         for id in repositories.map(\.id) {

@@ -59,6 +59,7 @@ final class EditorSettings: ObservableObject {
     @Published var showGutter = true
     @Published var showMinimap = true
     @Published var showFoldingRibbon = true
+    @Published var gitWorktreePath = ".worktrees"
     @Published var pluginError: String?
 }
 
@@ -237,12 +238,46 @@ private final class LuaDocViewAPI {
 }
 
 @MainActor
+@LuaModule("git")
+private final class LuaGitConfigAPI {
+    let settings: EditorSettings
+
+    init(settings: EditorSettings) {
+        self.settings = settings
+    }
+
+    @LuaField("worktree_path")
+    var worktreePath: String {
+        get { settings.gitWorktreePath }
+        set { settings.gitWorktreePath = newValue }
+    }
+}
+
+@MainActor
+private final class LuaConfigAPI: LuaModuleRegistrable {
+    let luaName = "config"
+    let settings: EditorSettings
+
+    init(settings: EditorSettings) {
+        self.settings = settings
+    }
+
+    func pushLuaTable(onto state: LuaPluginState) {
+        state.newtable(nrec: 1)
+        let git = LuaGitConfigAPI(settings: settings)
+        git.pushLuaTable(onto: state)
+        state.rawset(-2, utf8Key: git.luaName)
+    }
+}
+
+@MainActor
 final class LuaPluginHost: ObservableObject {
-    static let apiVersion = "0.2"
+    static let apiVersion = "0.3"
 
     let settings: EditorSettings
     let configDirectory: URL
     let commandManager: CommandManager
+    let contextMenuRegistry: ContextMenuRegistry
     private weak var workspace: WorkspaceModel?
     private let state = LuaState(libraries: .all)
 
@@ -275,11 +310,13 @@ final class LuaPluginHost: ObservableObject {
         settings: EditorSettings,
         configDirectory: URL,
         commandManager: CommandManager,
-        workspace: WorkspaceModel? = nil
+        workspace: WorkspaceModel? = nil,
+        contextMenuRegistry: ContextMenuRegistry? = nil
     ) {
         self.settings = settings
         self.configDirectory = configDirectory
         self.commandManager = commandManager
+        self.contextMenuRegistry = contextMenuRegistry ?? ContextMenuRegistry()
         self.workspace = workspace
         state.setRequireRoot(configDirectory.path)
         do {
@@ -341,6 +378,28 @@ final class LuaPluginHost: ObservableObject {
             state.push(openTerminalModule)
         }
 
+        let contextMenuAPI = LuaContextMenuAPI(registry: contextMenuRegistry)
+        contextMenuAPI.pushLuaTable(onto: state)
+        let contextMenuTable = state.popref()
+        let openContextMenuModule: LuaClosure = { state in
+            state.push(contextMenuTable)
+            return 1
+        }
+        try state.requiref(name: contextMenuAPI.luaName, global: false) {
+            state.push(openContextMenuModule)
+        }
+
+        let configAPI = LuaConfigAPI(settings: settings)
+        configAPI.pushLuaTable(onto: state)
+        let configTable = state.popref()
+        let openConfigModule: LuaClosure = { state in
+            state.push(configTable)
+            return 1
+        }
+        try state.requiref(name: configAPI.luaName, global: true) {
+            state.push(openConfigModule)
+        }
+
         let modules: [any LuaModuleRegistrable] = [
             LuaCoreAPI(apiVersion: Self.apiVersion, configDirectory: configDirectory.path),
             LuaWindowAPI(settings: settings),
@@ -349,7 +408,7 @@ final class LuaPluginHost: ObservableObject {
             LuaDocViewAPI(settings: settings)
         ]
         let openModule: LuaClosure = { state in
-            state.newtable(nrec: CInt(modules.count + 2))
+            state.newtable(nrec: CInt(modules.count + 4))
             for module in modules {
                 module.pushLuaTable(onto: state)
                 state.rawset(-2, utf8Key: module.luaName)
@@ -358,6 +417,10 @@ final class LuaPluginHost: ObservableObject {
             state.rawset(-2, utf8Key: commandAPI.luaName)
             state.push(terminalTable)
             state.rawset(-2, utf8Key: terminalAPI.luaName)
+            state.push(contextMenuTable)
+            state.rawset(-2, utf8Key: contextMenuAPI.luaName)
+            state.push(configTable)
+            state.rawset(-2, utf8Key: configAPI.luaName)
             return 1
         }
         try state.requiref(name: "devhq", global: false) {

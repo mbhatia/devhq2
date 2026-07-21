@@ -32,8 +32,9 @@ struct DevHQApp: App {
         let stateStore = WorkspaceStateStore()
         let workspace = WorkspaceModel(stateStore: stateStore)
         let plugins = LuaPluginHost(commandManager: commandManager, workspace: workspace)
+        let worktreeService = LibGit2WorktreeService()
         let worktreeExplorer = WorktreeExplorerModel(
-            discoverer: LibGit2WorktreeService(),
+            discoverer: worktreeService,
             onActivate: { repository, worktree in
                 workspace.openWorktree(
                     canonicalRepositoryName: repository.canonicalName,
@@ -49,6 +50,13 @@ struct DevHQApp: App {
                 )
             },
             stateStore: stateStore
+        )
+        registerBuiltInContextMenus(
+            in: plugins.contextMenuRegistry,
+            workspace: workspace,
+            worktreeExplorer: worktreeExplorer,
+            settings: plugins.settings,
+            worktreeManager: worktreeService
         )
         do {
             try registerBuiltInCommands(
@@ -114,7 +122,8 @@ struct DevHQApp: App {
                 layout: layout,
                 commandManager: commandManager,
                 commandPalette: commandPalette,
-                commandContext: commandContext
+                commandContext: commandContext,
+                contextMenuRegistry: plugins.contextMenuRegistry
             )
                 .frame(minWidth: 900, minHeight: 600)
         }
@@ -168,9 +177,18 @@ struct DevHQApp: App {
         let commandPalette = CommandPaletteController(commandManager: commandManager)
         let commandContext = CommandContextTracker()
         let model = WorkspaceModel()
+        let contextMenuRegistry = ContextMenuRegistry()
+        let worktreeService = LibGit2WorktreeService()
         let worktreeExplorer = WorktreeExplorerModel(
-            discoverer: LibGit2WorktreeService(),
+            discoverer: worktreeService,
             onActivate: { worktree in model.openWorkspace(worktree.url) }
+        )
+        registerBuiltInContextMenus(
+            in: contextMenuRegistry,
+            workspace: model,
+            worktreeExplorer: worktreeExplorer,
+            settings: settings,
+            worktreeManager: worktreeService
         )
         do {
             try registerBuiltInCommands(
@@ -190,6 +208,7 @@ struct DevHQApp: App {
             commandManager: commandManager,
             commandPalette: commandPalette,
             commandContext: commandContext,
+            contextMenuRegistry: contextMenuRegistry,
             tracksLayoutChanges: false
         )
             .frame(width: 1200, height: 760)

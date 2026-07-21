@@ -101,8 +101,15 @@ final class DevHQTests: XCTestCase {
 
         let script = """
         local devhq = require "devhq"
+        local required_config = require "config"
         local layout = require "plugins.layout"
-        assert(devhq.core.api_version == "0.2")
+        assert(devhq.core.api_version == "0.3")
+        assert(required_config == config)
+        assert(config == devhq.config)
+        assert(config.git.worktree_path == ".worktrees")
+        config.git.worktree_path = "trees"
+        assert(required_config.git.worktree_path == "trees")
+        assert(devhq.config.git.worktree_path == "trees")
         devhq.window.theme = "dark"
         layout.apply(devhq)
         devhq.split.direction = "vertical"
@@ -145,6 +152,7 @@ final class DevHQTests: XCTestCase {
         XCTAssertFalse(settings.showGutter)
         XCTAssertFalse(settings.showMinimap)
         XCTAssertFalse(settings.showFoldingRibbon)
+        XCTAssertEqual(settings.gitWorktreePath, "trees")
     }
 
     @MainActor

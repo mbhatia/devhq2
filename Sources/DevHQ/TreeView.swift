@@ -1,16 +1,25 @@
 import SwiftUI
 
+struct TreeContextMenuEntry: Identifiable {
+    let id: String
+    let title: String
+    var isEnabled = true
+    let action: () -> Void
+}
+
 struct TreeView<ID: Hashable, Value, RowContent: View>: View {
     @ObservedObject var model: TreeModel<ID, Value>
     let selectedID: ID?
     let onToggle: ((TreeNode<ID, Value>) -> Void)?
     let onSelect: (TreeNode<ID, Value>) -> Void
+    let contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])?
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
 
     init(
         model: TreeModel<ID, Value>,
         selectedID: ID?,
         onToggle: ((TreeNode<ID, Value>) -> Void)? = nil,
+        contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])? = nil,
         onSelect: @escaping (TreeNode<ID, Value>) -> Void,
         @ViewBuilder rowContent: @escaping (TreeNode<ID, Value>) -> RowContent
     ) {
@@ -18,6 +27,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
         self.selectedID = selectedID
         self.onToggle = onToggle
         self.onSelect = onSelect
+        self.contextMenuProvider = contextMenuProvider
         self.rowContent = rowContent
     }
 
@@ -29,6 +39,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
             level: 0,
             onToggle: onToggle,
             onSelect: onSelect,
+            contextMenuProvider: contextMenuProvider,
             rowContent: rowContent
         )
     }
@@ -41,6 +52,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
     let level: Int
     let onToggle: ((TreeNode<ID, Value>) -> Void)?
     let onSelect: (TreeNode<ID, Value>) -> Void
+    let contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])?
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
 
     var body: some View {
@@ -77,6 +89,14 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .contextMenu {
+                    if let entries = contextMenuProvider?(node) {
+                        ForEach(entries) { entry in
+                            Button(entry.title, action: entry.action)
+                                .disabled(!entry.isEnabled)
+                        }
+                    }
+                }
 
                 if let children = node.children, model.isExpanded(node) {
                     TreeRows(
@@ -86,6 +106,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                         level: level + 1,
                         onToggle: onToggle,
                         onSelect: onSelect,
+                        contextMenuProvider: contextMenuProvider,
                         rowContent: rowContent
                     )
                 }
