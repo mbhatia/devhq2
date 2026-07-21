@@ -342,6 +342,12 @@ private struct WorktreeExplorerSidebar: View {
                         model: explorer.tree,
                         selectedID: explorer.selectedNodeID,
                         onToggle: { node in explorer.toggle(node) },
+                        isContainer: { node in
+                            switch node.value {
+                            case .repository, .worktree: true
+                            case .agent: false
+                            }
+                        },
                         isBranchSelectable: { node in
                             if case .worktree = node.value { return true }
                             return false
@@ -359,11 +365,13 @@ private struct WorktreeExplorerSidebar: View {
                         }
                     ) { node in
                         explorer.activate(node)
-                    } rowContent: { node in
+                    } rowContent: { visualNode in
                         WorktreeExplorerRow(
-                            node: node,
-                            profile: agentProfile(for: node),
-                            isSelected: explorer.selectedNodeID == node.id
+                            nodes: visualNode.nodes,
+                            profile: agentProfile(for: visualNode.terminal),
+                            isSelected: visualNode.nodes.contains {
+                                explorer.selectedNodeID == $0.id
+                            }
                         )
                     }
                     .padding(.horizontal, 10)
@@ -398,14 +406,14 @@ private struct WorktreeExplorerSidebar: View {
 }
 
 private struct WorktreeExplorerRow: View {
-    let node: WorktreeNode
+    let nodes: [WorktreeNode]
     let profile: AgentProfile?
     let isSelected: Bool
     @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 6) {
-            if case .agent = node.value {
+            if case .agent = head.value {
                 Text(profile?.icon ?? "@")
                     .font(agentIconFont)
                     .foregroundStyle(agentIconColor)
@@ -413,16 +421,16 @@ private struct WorktreeExplorerRow: View {
             } else {
                 Image(systemName: iconName)
             }
-            Text(node.value.name)
+            Text(nodes.map(\.value.name).joined(separator: "/"))
         }
             .lineLimit(1)
-            .help(node.value.url.path)
+            .help(terminal.value.url.path)
             .padding(.vertical, 3)
             .onHover { isHovered = $0 }
     }
 
     private var iconName: String {
-        switch node.value {
+        switch head.value {
         case .repository: "externaldrive"
         case .worktree: "arrow.triangle.branch"
         case .agent: "at"
@@ -437,11 +445,14 @@ private struct WorktreeExplorerRow: View {
 
     private var agentIconColor: Color {
         if profile?.iconColor == .accent { return .accentColor }
-        guard case .agent(let agent) = node.value else { return .secondary }
+        guard case .agent(let agent) = head.value else { return .secondary }
         if agent.needsInput { return Color(nsColor: .systemOrange) }
         if isSelected || isHovered { return .accentColor }
         return .secondary
     }
+
+    private var head: WorktreeNode { nodes[0] }
+    private var terminal: WorktreeNode { nodes[nodes.count - 1] }
 }
 
 private struct Sidebar: View {
@@ -494,8 +505,8 @@ private struct Sidebar: View {
                             workspace.open(node)
                         } onDoubleSelect: { node in
                             workspace.openPersistently(node)
-                        } rowContent: { node in
-                            FileRow(node: node)
+                        } rowContent: { visualNode in
+                            FileRow(nodes: visualNode.nodes)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -546,11 +557,11 @@ private struct Sidebar: View {
 }
 
 private struct FileRow: View {
-    let node: FileNode
+    let nodes: [FileNode]
 
     var body: some View {
         HStack(spacing: 6) {
-            Label(node.name, systemImage: iconName)
+            Label(nodes.map(\.name).joined(separator: "/"), systemImage: iconName)
                 .lineLimit(1)
             Spacer(minLength: 4)
             if let change = node.value.change {
@@ -576,6 +587,8 @@ private struct FileRow: View {
         default: return "doc.plaintext"
         }
     }
+
+    private var node: FileNode { nodes[nodes.count - 1] }
 
     private func changeCount(_ change: GitFileChange) -> String {
         guard !change.isBinary else { return "+? −?" }
