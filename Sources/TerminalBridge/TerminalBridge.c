@@ -25,6 +25,11 @@ struct DevHQTerminal {
     GhosttyRenderState render_state;
     GhosttyKeyEncoder key_encoder;
     GhosttyMouseEncoder mouse_encoder;
+    uint16_t columns;
+    uint16_t rows;
+    uint32_t pixel_width;
+    uint32_t pixel_height;
+    bool has_size;
 #endif
 };
 
@@ -48,7 +53,8 @@ DevHQTerminal *devhq_terminal_create(
     uint16_t rows,
     uint32_t pixel_width,
     uint32_t pixel_height) {
-    if (!cwd || !shell || argv_count > 1024 || (argv_count > 0 && !argv)) return NULL;
+    if (!cwd || !shell || columns == 0 || rows == 0 || argv_count > 1024 ||
+        (argv_count > 0 && !argv)) return NULL;
     for (size_t index = 0; index < argv_count; ++index) {
         if (!argv[index]) return NULL;
     }
@@ -82,8 +88,23 @@ DevHQTerminal *devhq_terminal_create(
         free(terminal);
         return NULL;
     }
-    (void)ghostty_terminal_resize(
-        terminal->ghostty, columns, rows, pixel_width / columns, pixel_height / rows);
+    if (ghostty_terminal_resize(
+            terminal->ghostty, columns, rows, pixel_width / columns, pixel_height / rows)
+            != GHOSTTY_SUCCESS ||
+        ghostty_render_state_update(terminal->render_state, terminal->ghostty)
+            != GHOSTTY_SUCCESS) {
+        ghostty_mouse_encoder_free(terminal->mouse_encoder);
+        ghostty_key_encoder_free(terminal->key_encoder);
+        ghostty_render_state_free(terminal->render_state);
+        ghostty_terminal_free(terminal->ghostty);
+        free(terminal);
+        return NULL;
+    }
+    terminal->columns = columns;
+    terminal->rows = rows;
+    terminal->pixel_width = pixel_width;
+    terminal->pixel_height = pixel_height;
+    terminal->has_size = true;
 #endif
     struct winsize size = make_winsize(columns, rows, pixel_width, pixel_height);
     pid_t pid = forkpty(&terminal->fd, NULL, NULL, &size);
@@ -203,13 +224,29 @@ bool devhq_terminal_resize(
     uint32_t pixel_width,
     uint32_t pixel_height) {
     if (!terminal || terminal->fd < 0 || columns == 0 || rows == 0) return false;
+#ifdef DEVHQ_USE_GHOSTTY
+    // libghostty ends synchronized output on resize, so repeated layout passes must be no-ops.
+    if (terminal->has_size && terminal->columns == columns && terminal->rows == rows &&
+        terminal->pixel_width == pixel_width && terminal->pixel_height == pixel_height) {
+        return true;
+    }
+#endif
     struct winsize size = make_winsize(columns, rows, pixel_width, pixel_height);
     bool result = ioctl(terminal->fd, TIOCSWINSZ, &size) == 0;
 #ifdef DEVHQ_USE_GHOSTTY
+    if (!result) return false;
     uint32_t cell_width = columns ? pixel_width / columns : 0;
     uint32_t cell_height = rows ? pixel_height / rows : 0;
-    result = ghostty_terminal_resize(
-        terminal->ghostty, columns, rows, cell_width, cell_height) == GHOSTTY_SUCCESS && result;
+    bool resized = ghostty_terminal_resize(
+        terminal->ghostty, columns, rows, cell_width, cell_height) == GHOSTTY_SUCCESS;
+    if (resized) {
+        terminal->columns = columns;
+        terminal->rows = rows;
+        terminal->pixel_width = pixel_width;
+        terminal->pixel_height = pixel_height;
+        terminal->has_size = true;
+    }
+    result = resized;
 #endif
     return result;
 }
@@ -346,8 +383,16 @@ bool devhq_terminal_snapshot(
     return false;
 #else
     if (!terminal || !cells || !snapshot) return false;
-    if (ghostty_render_state_update(terminal->render_state, terminal->ghostty) != GHOSTTY_SUCCESS)
+    bool synchronized = false;
+    if (ghostty_terminal_mode_get(
+            terminal->ghostty, GHOSTTY_MODE_SYNC_OUTPUT, &synchronized) != GHOSTTY_SUCCESS) {
         return false;
+    }
+    // Keep publishing the last complete frame until the application ends its synchronized update.
+    if (!synchronized &&
+        ghostty_render_state_update(terminal->render_state, terminal->ghostty) != GHOSTTY_SUCCESS) {
+        return false;
+    }
     uint16_t columns = 0, rows = 0;
     if (ghostty_render_state_get(
             terminal->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
@@ -378,11 +423,11 @@ bool devhq_terminal_snapshot(
     if (ghostty_render_state_row_iterator_new(NULL, &iterator) != GHOSTTY_SUCCESS ||
         ghostty_render_state_row_cells_new(NULL, &row_cells) != GHOSTTY_SUCCESS) goto fail;
     if (ghostty_render_state_get(terminal->render_state,
-            GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, iterator) != GHOSTTY_SUCCESS) goto fail;
+            GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &iterator) != GHOSTTY_SUCCESS) goto fail;
     size_t y = 0;
     while (y < rows && ghostty_render_state_row_iterator_next(iterator)) {
         if (ghostty_render_state_row_get(iterator,
-                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, row_cells) != GHOSTTY_SUCCESS) goto fail;
+                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &row_cells) != GHOSTTY_SUCCESS) goto fail;
         size_t x = 0;
         while (x < columns && ghostty_render_state_row_cells_next(row_cells)) {
             DevHQTerminalCell *output = &cells[y * columns + x];

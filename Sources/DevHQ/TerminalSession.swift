@@ -122,6 +122,8 @@ enum TerminalSessionError: LocalizedError {
 
 @MainActor
 final class TerminalSession: ObservableObject, Identifiable {
+    static var usesGhosttyRenderer: Bool { devhq_terminal_uses_ghostty() }
+
     let id = UUID()
     let rootURL: URL
     let processID: Int32

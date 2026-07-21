@@ -237,6 +237,90 @@ final class TerminalSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testSynchronizedOutputKeepsLastCompletedGhosttySnapshot() throws {
+        guard TerminalSession.usesGhosttyRenderer else {
+            return XCTFail("The configured DevHQ build must use libghostty")
+        }
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(
+            rootURL: root,
+            command: [
+                "/bin/sh", "-c",
+                "printf '\\033[?1049h\\033[2J\\033[HOLD\\033]2;baseline-ready\\007'; "
+                    + "IFS= read -r _; "
+                    + "printf '\\033[?2026h\\033[HNEW\\033]2;sync-pending\\007'; "
+                    + "IFS= read -r _; "
+                    + "printf '\\033[?2026l\\033]2;sync-complete\\007'; sleep 1"
+            ]
+        )
+        defer { session.close() }
+
+        let baselineDeadline = Date().addingTimeInterval(3)
+        while (session.title != "baseline-ready" || !snapshotText(session).contains("OLD")),
+              Date() < baselineDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        XCTAssertEqual(session.title, "baseline-ready")
+        XCTAssertTrue(snapshotText(session).contains("OLD"))
+
+        session.send(text: "\n")
+        let pendingDeadline = Date().addingTimeInterval(3)
+        while session.title != "sync-pending", Date() < pendingDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        XCTAssertEqual(session.title, "sync-pending")
+        XCTAssertTrue(snapshotText(session).contains("OLD"))
+        XCTAssertFalse(snapshotText(session).contains("NEW"))
+
+        // Repeated layout passes must not make libghostty end the synchronized frame early.
+        session.resize(columns: 80, rows: 24, pixelWidth: 0, pixelHeight: 0)
+        XCTAssertTrue(snapshotText(session).contains("OLD"))
+        XCTAssertFalse(snapshotText(session).contains("NEW"))
+
+        session.send(text: "\n")
+        let completedDeadline = Date().addingTimeInterval(3)
+        while (session.title != "sync-complete" || !snapshotText(session).contains("NEW")),
+              Date() < completedDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        XCTAssertEqual(session.title, "sync-complete")
+        XCTAssertTrue(snapshotText(session).contains("NEW"))
+        XCTAssertFalse(snapshotText(session).contains("OLD"))
+    }
+
+    @MainActor
+    func testGhosttyAlternateScreenScrollShiftsEveryVisibleRow() throws {
+        guard TerminalSession.usesGhosttyRenderer else {
+            return XCTFail("The configured DevHQ build must use libghostty")
+        }
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(
+            rootURL: root,
+            command: [
+                "/bin/sh", "-c",
+                #"stty -echo; printf '\033]2;resize-ready\007'; IFS= read -r _; "#
+                    + #"printf '\033[?1049h\033[2J\033[HONE\r\nTWO\r\nTHREE"#
+                    + #"\033]2;initial-screen\007'; IFS= read -r _; "#
+                    + #"printf '\r\nFOUR\033]2;shifted-screen\007'; sleep 1"#
+            ]
+        )
+        defer { session.close() }
+
+        awaitTitle("resize-ready", in: session)
+        session.resize(columns: 8, rows: 3, pixelWidth: 0, pixelHeight: 0)
+        session.send(text: "\n")
+
+        awaitTitle("initial-screen", in: session)
+        XCTAssertEqual(snapshotRows(session), ["ONE", "TWO", "THREE"])
+
+        session.send(text: "\n")
+        awaitTitle("shifted-screen", in: session)
+        XCTAssertEqual(snapshotRows(session), ["TWO", "THREE", "FOUR"])
+    }
+
+    @MainActor
     func testMixedTabsSurviveWorktreeSwitchAndPersistenceContainsOnlyFiles() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -296,6 +380,27 @@ final class TerminalSessionTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+}
+
+@MainActor
+private func snapshotText(_ session: TerminalSession) -> String {
+    session.snapshot.cells.flatMap { $0 }.map(\.text).joined()
+}
+
+@MainActor
+private func snapshotRows(_ session: TerminalSession) -> [String] {
+    session.snapshot.cells.map {
+        $0.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+    }
+}
+
+@MainActor
+private func awaitTitle(_ title: String, in session: TerminalSession) {
+    let deadline = Date().addingTimeInterval(3)
+    while session.title != title, Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+    }
+    XCTAssertEqual(session.title, title)
 }
 
 @MainActor

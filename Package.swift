@@ -2,14 +2,6 @@
 
 import PackageDescription
 import CompilerPluginSupport
-import Foundation
-
-let ghosttyFrameworkPath = "ghostty-vt.xcframework"
-let hasGhosttyFramework = FileManager.default.fileExists(atPath: ghosttyFrameworkPath)
-var terminalBridgeDependencies: [Target.Dependency] = []
-if hasGhosttyFramework {
-    terminalBridgeDependencies.append("GhosttyVt")
-}
 
 let package = Package(
     name: "DevHQ",
@@ -65,11 +57,9 @@ let package = Package(
         ),
         .target(
             name: "TerminalBridge",
-            dependencies: terminalBridgeDependencies,
+            dependencies: ["GhosttyVt"],
             path: "Sources/TerminalBridge",
-            cSettings: hasGhosttyFramework
-                ? [.define("DEVHQ_USE_GHOSTTY"), .define("GHOSTTY_STATIC")]
-                : [],
+            cSettings: [.define("DEVHQ_USE_GHOSTTY"), .define("GHOSTTY_STATIC")],
             linkerSettings: [.linkedLibrary("util")]
         ),
         .executableTarget(
@@ -111,8 +101,7 @@ let package = Package(
             name: "libcrypto",
             url: "https://raw.githubusercontent.com/swift-developer-tools/swift-libgit2/1.0.1/swift-libgit2-base/lib/libcrypto.zip",
             checksum: "c3bc28f0a252b60189e931540e1efaad7e3479e69b3fa9acf1d134835f9a1fb7"
-        )
-    ] + (hasGhosttyFramework ? [
-        .binaryTarget(name: "GhosttyVt", path: ghosttyFrameworkPath)
-    ] : [])
+        ),
+        .binaryTarget(name: "GhosttyVt", path: "ghostty-vt.xcframework")
+    ]
 )
