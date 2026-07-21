@@ -75,6 +75,26 @@ swift run DevHQ
 Use **Open Folder** to load a workspace, click files in the sidebar to open tabs,
 edit in place, and press **Command-S** to save.
 
+## Package for macOS
+
+Build a release app bundle and a mountable drag-to-Applications DMG on macOS:
+
+```sh
+./build_installer.sh
+```
+
+The default artifact is `dist/DevHQ-macos-<architecture>.dmg`. The mounted
+image contains `DevHQ.app` and an `Applications` symlink. The app is unsigned
+and not notarized; distribution signing is not automated because SwiftPM's
+generated resource accessors require resource bundles at the app root.
+`VERSION`, `BUILD_NUMBER`, `BUNDLE_IDENTIFIER`, `ARCH`, `DIST_DIR`, and
+`OUTPUT_DMG` are optional environment overrides. Use `--stage-only` to build
+and verify the app without creating a DMG.
+
+The package includes the app icon from `assets/DevHQ.icns`, SwiftPM resource
+bundles, the statically linked Lua runtime, and DevHQ, Lua, LuaSwift, and
+Ghostty/libghostty license notices under `DevHQ.app/Contents/Resources/legal`.
+
 ## Terminal tabs
 
 DevHQ supports live terminal tabs in the editor area. Press **Control-Shift-`**

@@ -4,3 +4,4 @@
 .DS_Store
 ghostty-vt.xcframework/
 Sources/DevHQ/Resources/terminfo/
+dist/
