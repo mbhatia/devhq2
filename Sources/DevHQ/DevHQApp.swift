@@ -31,7 +31,8 @@ struct DevHQApp: App {
         let commandPalette = CommandPaletteController(commandManager: commandManager)
         let commandContext = CommandContextTracker()
         let stateStore = WorkspaceStateStore()
-        let workspace = WorkspaceModel(stateStore: stateStore)
+        let gitQuery = GitQueryService()
+        let workspace = WorkspaceModel(stateStore: stateStore, gitQuery: gitQuery)
         let plugins = LuaPluginHost(commandManager: commandManager, workspace: workspace)
         let agentManager = AgentManager(
             workspace: workspace,
@@ -158,7 +159,7 @@ struct DevHQApp: App {
                     workspace.saveSelected()
                 }
                 .keyboardShortcut("s")
-                .disabled(workspace.selectedDocument == nil)
+                .disabled(workspace.selectedDocument?.isReadOnly != false)
             }
             CommandGroup(after: .saveItem) {
                 Button("New Terminal") {

@@ -10,22 +10,73 @@ struct SourceEditorView: View {
     let showGutter: Bool
     let showMinimap: Bool
     let showFoldingRibbon: Bool
+    let isEditable: Bool
+    let diffConfiguration: DiffEditorConfiguration?
 
     @State private var state = SourceEditorState()
     @State private var syntaxHighlighter = CorrectedTreeSitterHighlightProvider()
+    @StateObject private var diffPresentation = DiffEditorPresentation()
+
+    init(
+        text: Binding<String>,
+        language: CodeLanguage,
+        isDark: Bool,
+        showGutter: Bool,
+        showMinimap: Bool,
+        showFoldingRibbon: Bool,
+        isEditable: Bool = true,
+        diffConfiguration: DiffEditorConfiguration? = nil
+    ) {
+        _text = text
+        self.language = language
+        self.isDark = isDark
+        self.showGutter = showGutter
+        self.showMinimap = showMinimap
+        self.showFoldingRibbon = showFoldingRibbon
+        self.isEditable = isEditable
+        self.diffConfiguration = diffConfiguration
+    }
 
     var body: some View {
-        SourceEditor(
-            $text,
-            language: language,
-            configuration: Self.configuration(
-                isDark: isDark,
-                showGutter: showGutter,
-                showMinimap: showMinimap,
-                showFoldingRibbon: showFoldingRibbon
-            ),
-            state: $state,
-            highlightProviders: [syntaxHighlighter]
+        ZStack(alignment: .topTrailing) {
+            SourceEditor(
+                $text,
+                language: language,
+                configuration: Self.configuration(
+                    isDark: isDark,
+                    showGutter: showGutter,
+                    showMinimap: showMinimap,
+                    showFoldingRibbon: showFoldingRibbon,
+                    isEditable: isEditable
+                ),
+                state: $state,
+                highlightProviders: [syntaxHighlighter],
+                coordinators: [diffPresentation.coordinator]
+            )
+
+            if diffConfiguration?.isEnabled == true,
+               let message = diffPresentation.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+                    .padding(8)
+            }
+        }
+        .task(id: diffLoadIdentity) {
+            await diffPresentation.load(diffConfiguration)
+        }
+        .onDisappear {
+            diffPresentation.invalidate()
+        }
+    }
+
+    private var diffLoadIdentity: DiffLoadIdentity {
+        DiffLoadIdentity(
+            isEnabled: diffConfiguration?.isEnabled == true,
+            context: diffConfiguration?.context
         )
     }
 
@@ -33,7 +84,8 @@ struct SourceEditorView: View {
         isDark: Bool,
         showGutter: Bool = true,
         showMinimap: Bool = true,
-        showFoldingRibbon: Bool = true
+        showFoldingRibbon: Bool = true,
+        isEditable: Bool = true
     ) -> SourceEditorConfiguration {
         SourceEditorConfiguration(
             appearance: .init(
@@ -43,7 +95,10 @@ struct SourceEditorView: View {
                 wrapLines: false,
                 tabWidth: 4
             ),
-            behavior: .init(indentOption: .spaces(count: 4)),
+            behavior: .init(
+                isEditable: isEditable,
+                indentOption: .spaces(count: 4)
+            ),
             layout: .init(editorOverscroll: 0.15),
             peripherals: .init(
                 showGutter: showGutter,
@@ -52,6 +107,11 @@ struct SourceEditorView: View {
             )
         )
     }
+}
+
+private struct DiffLoadIdentity: Hashable {
+    let isEnabled: Bool
+    let context: DiffEditorContext?
 }
 
 private extension EditorTheme {

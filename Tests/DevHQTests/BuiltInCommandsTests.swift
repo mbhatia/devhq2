@@ -17,7 +17,9 @@ final class BuiltInCommandsTests: XCTestCase {
 
         XCTAssertEqual(Set(manager.commandsByID.keys), [
             "worktree:add-repo", "file:new", "file:new-dir", "file:close",
-            "terminal:new", "terminal:close", "agent:create"
+            "terminal:new", "terminal:close", "agent:create", "git:toggle-diff",
+            "git:filter-full", "git:filter-uncommitted", "git:filter-staged",
+            "git:filter-head"
         ])
         XCTAssertEqual(manager.commandsByID["agent:create"]?.title, "agent: create")
         XCTAssertEqual(manager.commandsByID["worktree:add-repo"]?.title, "worktree: add repo")
@@ -26,6 +28,8 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(manager.commandsByID["file:close"]?.title, "file: close")
         XCTAssertEqual(manager.commandsByID["terminal:new"]?.title, "terminal: new")
         XCTAssertEqual(manager.commandsByID["terminal:close"]?.title, "terminal: close")
+        XCTAssertEqual(manager.commandsByID["git:filter-full"]?.title, "git: filter full")
+        XCTAssertEqual(manager.commandsByID["git:toggle-diff"]?.title, "git: toggle diff")
         XCTAssertEqual(
             manager.commandsByID["worktree:add-repo"]?.viewKinds,
             Set(CommandViewKind.allCases)
@@ -36,6 +40,14 @@ final class BuiltInCommandsTests: XCTestCase {
         XCTAssertEqual(manager.commandsByID["terminal:new"]?.viewKinds, Set(CommandViewKind.allCases))
         XCTAssertEqual(manager.commandsByID["terminal:close"]?.viewKinds, [.terminal])
         XCTAssertEqual(manager.commandsByID["agent:create"]?.viewKinds, Set(CommandViewKind.allCases))
+        XCTAssertEqual(
+            manager.commandsByID["git:filter-uncommitted"]?.viewKinds,
+            Set(CommandViewKind.allCases)
+        )
+        XCTAssertEqual(
+            manager.commandsByID["git:toggle-diff"]?.viewKinds,
+            Set(CommandViewKind.allCases)
+        )
 
         for view in CommandViewKind.allCases {
             XCTAssertEqual(
@@ -49,11 +61,19 @@ final class BuiltInCommandsTests: XCTestCase {
         workspace.openWorkspace(root)
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .file)).map(\.id),
-            ["file:new", "file:new-dir", "terminal:new", "worktree:add-repo"]
+            [
+                "file:new", "file:new-dir", "git:filter-full", "git:filter-head",
+                "git:filter-staged", "git:filter-uncommitted", "git:toggle-diff",
+                "terminal:new", "worktree:add-repo"
+            ]
         )
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .document)).map(\.id),
-            ["file:new", "file:new-dir", "terminal:new", "worktree:add-repo"]
+            [
+                "file:new", "file:new-dir", "git:filter-full", "git:filter-head",
+                "git:filter-staged", "git:filter-uncommitted", "git:toggle-diff",
+                "terminal:new", "worktree:add-repo"
+            ]
         )
 
         let existingFile = root.appendingPathComponent("Open.swift")
@@ -61,7 +81,11 @@ final class BuiltInCommandsTests: XCTestCase {
         workspace.openFile(existingFile)
         XCTAssertEqual(
             try manager.commands(in: CommandContext(view: .document)).map(\.id),
-            ["file:close", "file:new", "file:new-dir", "terminal:new", "worktree:add-repo"]
+            [
+                "file:close", "file:new", "file:new-dir", "git:filter-full",
+                "git:filter-head", "git:filter-staged", "git:filter-uncommitted",
+                "git:toggle-diff", "terminal:new", "worktree:add-repo"
+            ]
         )
     }
 
@@ -107,6 +131,12 @@ final class BuiltInCommandsTests: XCTestCase {
             worktreeExplorer: explorer,
             pickers: pickers
         )
+
+        try manager.execute(id: "git:filter-staged", in: CommandContext(view: .file))
+        XCTAssertEqual(workspace.fileFilterMode, .staged)
+        XCTAssertTrue(workspace.isDiffOverlayEnabled)
+        try manager.execute(id: "git:toggle-diff", in: CommandContext(view: .document))
+        XCTAssertFalse(workspace.isDiffOverlayEnabled)
 
         try manager.execute(id: "worktree:add-repo", in: CommandContext(view: .document))
         XCTAssertEqual(repositoryPickerCalls, 1)

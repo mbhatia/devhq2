@@ -157,7 +157,7 @@ struct ContentView: View {
                 } label: {
                     Label("Save", systemImage: "square.and.arrow.down")
                 }
-                .disabled(workspace.selectedDocument == nil)
+                .disabled(workspace.selectedDocument?.isReadOnly != false)
             }
         }
         .alert(
@@ -477,27 +477,68 @@ private struct Sidebar: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    TreeView(
-                        model: workspace.fileTree,
-                        selectedID: workspace.selectedFileNodeID,
-                        contextMenuProvider: { node in
-                            treeContextMenuEntries(
-                                for: fileContextMenuSnapshot(for: node),
-                                registry: contextMenuRegistry
-                            ) { error in
-                                workspace.errorMessage = error.localizedDescription
+                VStack(spacing: 0) {
+                    ScrollView {
+                        TreeView(
+                            model: workspace.fileTree,
+                            selectedID: workspace.selectedFileNodeID,
+                            contextMenuProvider: { node in
+                                treeContextMenuEntries(
+                                    for: fileContextMenuSnapshot(for: node),
+                                    registry: contextMenuRegistry
+                                ) { error in
+                                    workspace.errorMessage = error.localizedDescription
+                                }
                             }
+                        ) { node in
+                            workspace.open(node)
+                        } onDoubleSelect: { node in
+                            workspace.openPersistently(node)
+                        } rowContent: { node in
+                            FileRow(node: node)
                         }
-                    ) { node in
-                        workspace.open(node)
-                    } rowContent: { node in
-                        FileRow(node: node)
-                    }
-                    .padding(.horizontal, 10)
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 6)
+                    }
+                    .background(Color(nsColor: .controlBackgroundColor))
+
+                    Divider()
+
+                    HStack(spacing: 14) {
+                        ForEach(FileExplorerFilterMode.allCases, id: \.self) { mode in
+                            Button {
+                                workspace.selectFileFilter(mode)
+                            } label: {
+                                Image(systemName: mode.iconName)
+                                    .frame(width: 18, height: 18)
+                                    .foregroundStyle(
+                                        workspace.fileFilterMode == mode
+                                            ? Color.accentColor
+                                            : Color.secondary
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help(mode.tooltip)
+                            .accessibilityLabel(mode.label)
+                        }
+                        Spacer(minLength: 0)
+                        if workspace.isFileFilterRefreshing {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+
+                    if let message = workspace.fileFilterStatusMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 7)
+                    }
                 }
-                .background(Color(nsColor: .controlBackgroundColor))
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -508,10 +549,22 @@ private struct FileRow: View {
     let node: FileNode
 
     var body: some View {
-        Label(node.name, systemImage: iconName)
-            .lineLimit(1)
-            .help(node.url.path)
-            .padding(.vertical, 3)
+        HStack(spacing: 6) {
+            Label(node.name, systemImage: iconName)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            if let change = node.value.change {
+                Text(change.kind.status)
+                    .font(.caption.monospaced().weight(.semibold))
+                    .foregroundStyle(statusColor(for: change.kind))
+                    .help(change.kind.label)
+                Text(changeCount(change))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .help(node.url.path)
+        .padding(.vertical, 3)
     }
 
     private var iconName: String {
@@ -521,6 +574,22 @@ private struct FileRow: View {
         case "md": return "doc.richtext"
         case "json", "yml", "yaml", "toml": return "curlybraces"
         default: return "doc.plaintext"
+        }
+    }
+
+    private func changeCount(_ change: GitFileChange) -> String {
+        guard !change.isBinary else { return "+? −?" }
+        let additions = change.additions.map(String.init) ?? "?"
+        let deletions = change.deletions.map(String.init) ?? "?"
+        return "+\(additions) −\(deletions)"
+    }
+
+    private func statusColor(for kind: GitChangeKind) -> Color {
+        switch kind {
+        case .added, .untracked, .copied: .green
+        case .deleted: .red
+        case .conflicted: .purple
+        default: .orange
         }
     }
 }
@@ -541,7 +610,11 @@ private struct EditorArea: View {
 
             Group {
                 if let document = workspace.selectedDocument {
-                    FileEditor(document: document, settings: settings)
+                    FileEditor(
+                        document: document,
+                        workspace: workspace,
+                        settings: settings
+                    )
                         .id(document.id)
                 } else if let terminal = workspace.selectedTerminal {
                     TerminalView(session: terminal)
@@ -637,6 +710,7 @@ private struct TabButton: View {
                 .foregroundStyle(.secondary)
             Text(document.url.lastPathComponent + (document.isDirty ? " •" : ""))
                 .lineLimit(1)
+                .italic(document.isEphemeral)
             Button(action: close) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
@@ -656,6 +730,7 @@ private struct TabButton: View {
 
 private struct FileEditor: View {
     @ObservedObject var document: EditorDocument
+    @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var settings: EditorSettings
     @Environment(\.colorScheme) private var colorScheme
 
@@ -666,7 +741,9 @@ private struct FileEditor: View {
             isDark: colorScheme == .dark,
             showGutter: settings.showGutter,
             showMinimap: settings.showMinimap,
-            showFoldingRibbon: settings.showFoldingRibbon
+            showFoldingRibbon: settings.showFoldingRibbon,
+            isEditable: !document.isReadOnly,
+            diffConfiguration: workspace.diffEditorConfiguration(for: document)
         )
     }
 }

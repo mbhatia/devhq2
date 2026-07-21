@@ -13,6 +13,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
     let onToggle: ((TreeNode<ID, Value>) -> Void)?
     let isBranchSelectable: (TreeNode<ID, Value>) -> Bool
     let onSelect: (TreeNode<ID, Value>) -> Void
+    let onDoubleSelect: ((TreeNode<ID, Value>) -> Void)?
     let contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])?
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
 
@@ -23,6 +24,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
         isBranchSelectable: @escaping (TreeNode<ID, Value>) -> Bool = { _ in false },
         contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])? = nil,
         onSelect: @escaping (TreeNode<ID, Value>) -> Void,
+        onDoubleSelect: ((TreeNode<ID, Value>) -> Void)? = nil,
         @ViewBuilder rowContent: @escaping (TreeNode<ID, Value>) -> RowContent
     ) {
         self.model = model
@@ -30,6 +32,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
         self.onToggle = onToggle
         self.isBranchSelectable = isBranchSelectable
         self.onSelect = onSelect
+        self.onDoubleSelect = onDoubleSelect
         self.contextMenuProvider = contextMenuProvider
         self.rowContent = rowContent
     }
@@ -43,6 +46,7 @@ struct TreeView<ID: Hashable, Value, RowContent: View>: View {
             onToggle: onToggle,
             isBranchSelectable: isBranchSelectable,
             onSelect: onSelect,
+            onDoubleSelect: onDoubleSelect,
             contextMenuProvider: contextMenuProvider,
             rowContent: rowContent
         )
@@ -57,6 +61,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
     let onToggle: ((TreeNode<ID, Value>) -> Void)?
     let isBranchSelectable: (TreeNode<ID, Value>) -> Bool
     let onSelect: (TreeNode<ID, Value>) -> Void
+    let onDoubleSelect: ((TreeNode<ID, Value>) -> Void)?
     let contextMenuProvider: ((TreeNode<ID, Value>) -> [TreeContextMenuEntry])?
     @ViewBuilder let rowContent: (TreeNode<ID, Value>) -> RowContent
 
@@ -90,6 +95,12 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .simultaneousGesture(
+                        TapGesture(count: 2).onEnded {
+                            guard !node.isBranch || isBranchSelectable(node) else { return }
+                            onDoubleSelect?(node)
+                        }
+                    )
                 }
                 .padding(.leading, CGFloat(level * 14))
                 .padding(.vertical, 2)
@@ -118,6 +129,7 @@ private struct TreeRows<ID: Hashable, Value, RowContent: View>: View {
                         onToggle: onToggle,
                         isBranchSelectable: isBranchSelectable,
                         onSelect: onSelect,
+                        onDoubleSelect: onDoubleSelect,
                         contextMenuProvider: contextMenuProvider,
                         rowContent: rowContent
                     )

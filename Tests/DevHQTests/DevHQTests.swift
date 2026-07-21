@@ -211,6 +211,13 @@ final class DevHQTests: XCTestCase {
         XCTAssertTrue(configuration.peripherals.showGutter)
         XCTAssertTrue(configuration.peripherals.showMinimap)
         XCTAssertTrue(configuration.peripherals.showFoldingRibbon)
+        XCTAssertTrue(configuration.behavior.isEditable)
+
+        let readOnlyConfiguration = SourceEditorView.configuration(
+            isDark: false,
+            isEditable: false
+        )
+        XCTAssertFalse(readOnlyConfiguration.behavior.isEditable)
     }
 
     @MainActor

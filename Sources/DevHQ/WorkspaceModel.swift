@@ -4,10 +4,22 @@ import Foundation
 
 struct FileItem {
     let url: URL
+    let change: GitFileChange?
+
+    init(url: URL, change: GitFileChange? = nil) {
+        self.url = url
+        self.change = change
+    }
+
     var name: String { url.lastPathComponent }
 }
 
 typealias FileNode = TreeNode<String, FileItem>
+
+private final class FilteredFileTreeEntry {
+    var children: [String: FilteredFileTreeEntry] = [:]
+    var change: GitFileChange?
+}
 
 enum WorkspaceCommandOperationError: LocalizedError, Equatable {
     case noWorkspace
@@ -43,19 +55,38 @@ final class EditorDocument: ObservableObject, Identifiable {
     let url: URL
     let treeNodeID: String?
     let language: CodeLanguage
-    @Published var text: String
+    let isReadOnly: Bool
+    @Published private(set) var snapshotFilterMode: FileExplorerFilterMode?
+    @Published private(set) var snapshotComparisonRevision: String?
+    @Published var text: String {
+        didSet {
+            if text != oldValue, !isReplacingReadOnlySnapshot {
+                promote()
+            }
+        }
+    }
+    @Published private(set) var isEphemeral: Bool
     private(set) var savedText: String
+    private var isReplacingReadOnlySnapshot = false
 
     init(
         url: URL,
         text: String,
         savedText: String? = nil,
-        treeNodeID: String? = nil
+        treeNodeID: String? = nil,
+        isEphemeral: Bool = false,
+        isReadOnly: Bool = false,
+        snapshotFilterMode: FileExplorerFilterMode? = nil,
+        snapshotComparisonRevision: String? = nil
     ) {
         self.url = url
         self.treeNodeID = treeNodeID
         self.text = text
         self.savedText = savedText ?? text
+        self.isEphemeral = isEphemeral
+        self.isReadOnly = isReadOnly
+        self.snapshotFilterMode = snapshotFilterMode
+        self.snapshotComparisonRevision = snapshotComparisonRevision
         self.language = CodeLanguage.detectLanguageFrom(
             url: url,
             prefixBuffer: String(text.prefix(256)),
@@ -68,6 +99,25 @@ final class EditorDocument: ObservableObject, Identifiable {
     func markSaved() {
         savedText = text
         objectWillChange.send()
+    }
+
+    func promote() {
+        guard isEphemeral else { return }
+        isEphemeral = false
+    }
+
+    func replaceReadOnlySnapshot(
+        text: String,
+        filterMode: FileExplorerFilterMode,
+        comparisonRevision: String
+    ) {
+        guard isReadOnly else { return }
+        isReplacingReadOnlySnapshot = true
+        self.text = text
+        savedText = text
+        snapshotFilterMode = filterMode
+        snapshotComparisonRevision = comparisonRevision
+        isReplacingReadOnlySnapshot = false
     }
 }
 
@@ -116,11 +166,24 @@ final class WorkspaceModel: ObservableObject {
     @Published var selectedDocumentID: UUID?
     @Published private(set) var tabs: [EditorTab] = []
     @Published private(set) var selectedTabID: UUID?
+    @Published var isDiffOverlayEnabled = true
+    @Published private(set) var fileFilterMode: FileExplorerFilterMode = .full
+    @Published private(set) var isFileFilterRefreshing = false
+    @Published private(set) var fileFilterStatusMessage: String?
+    @Published private(set) var fileFilterChangeCount = 0
+    @Published private(set) var fileFilterComparisonRevision = "unloaded"
     @Published var errorMessage: String?
     private var editorSessions: [URL: EditorSession] = [:]
     private let stateStore: WorkspaceStatePersisting?
     private var persistentWorkspaceIdentity: PersistentWorkspaceIdentity?
     private var lastSelectedDocumentID: UUID?
+    private let gitQuery: (any GitQuerying)?
+    private var fileFilterTask: Task<Void, Never>?
+    private var fileFilterRequestID = UUID()
+    private var deletedPreviewTask: Task<Void, Never>?
+    private var deletedPreviewRequestID = UUID()
+    private var fileExpansionIDsByMode: [FileExplorerFilterMode: Set<String>] = [:]
+    private var fileTreeRootURL: URL?
     /// Reports terminal tabs closed by an explicit UI or workspace operation.
     /// Natural process exits are reported by `TerminalSession.onNaturalExit` instead.
     var onTerminalExplicitlyClosed: ((TerminalSession) -> Void)?
@@ -139,9 +202,11 @@ final class WorkspaceModel: ObservableObject {
 
     init(
         arguments: [String] = CommandLine.arguments,
-        stateStore: WorkspaceStatePersisting? = nil
+        stateStore: WorkspaceStatePersisting? = nil,
+        gitQuery: (any GitQuerying)? = nil
     ) {
         self.stateStore = stateStore
+        self.gitQuery = gitQuery
         openCommandLineWorkspace(arguments)
     }
 
@@ -243,6 +308,8 @@ final class WorkspaceModel: ObservableObject {
               rootURL == identity.rootURL else { return }
 
         let persistedDocuments = documents.compactMap { document -> (String, PersistedEditorTabState)? in
+            guard !document.isReadOnly,
+                  !document.isEphemeral || document.isDirty else { return nil }
             guard let path = relativePath(for: document.url, in: identity.rootURL) else {
                 return nil
             }
@@ -256,11 +323,16 @@ final class WorkspaceModel: ObservableObject {
             )
         }
         let persistedDocumentPaths = Set(persistedDocuments.map(\.0))
-        let persistenceDocument = selectedDocument
-            ?? documents.first { $0.id == lastSelectedDocumentID }
-        let selectedTabPath = persistenceDocument
-            .flatMap { relativePath(for: $0.url, in: identity.rootURL) }
-            .flatMap { persistedDocumentPaths.contains($0) ? $0 : nil }
+        let selectedTabPath = [selectedDocument]
+            .compactMap { $0 }
+            .map { relativePath(for: $0.url, in: identity.rootURL) }
+            .compactMap { $0 }
+            .first(where: persistedDocumentPaths.contains)
+            ?? documents
+                .first { $0.id == lastSelectedDocumentID }
+                .flatMap { relativePath(for: $0.url, in: identity.rootURL) }
+                .flatMap { persistedDocumentPaths.contains($0) ? $0 : nil }
+            ?? persistedDocuments.last?.0
         let state = PersistedWorkspaceState(
             expandedFileNodeIDs: fileTree.expandedIDs.sorted(),
             tabs: persistedDocuments.map(\.1),
@@ -313,37 +385,68 @@ final class WorkspaceModel: ObservableObject {
 
     func open(_ node: FileNode) {
         guard !node.isDirectory else { return }
-        openFile(node.url, treeNodeID: node.id)
+        invalidateDeletedPreviewRequest()
+        guard FileManager.default.fileExists(atPath: node.url.path) else {
+            if node.value.change?.kind == .deleted {
+                openDeletedSnapshot(node, asPreview: true)
+            } else {
+                errorMessage = "Could not open \(node.name) because it no longer exists."
+            }
+            return
+        }
+        openFile(node.url, treeNodeID: node.id, asPreview: true)
+    }
+
+    func openPersistently(_ node: FileNode) {
+        guard !node.isDirectory else { return }
+        invalidateDeletedPreviewRequest()
+        guard FileManager.default.fileExists(atPath: node.url.path) else {
+            if node.value.change?.kind == .deleted {
+                openDeletedSnapshot(node, asPreview: false)
+            } else {
+                errorMessage = "Could not open \(node.name) because it no longer exists."
+            }
+            return
+        }
+        openFile(node.url, treeNodeID: node.id, asPreview: false)
     }
 
     func openFile(_ url: URL) {
-        openFile(url, treeNodeID: fileNodeID(for: url))
+        invalidateDeletedPreviewRequest()
+        openFile(url, treeNodeID: fileNodeID(for: url), asPreview: false)
     }
 
-    private func openFile(_ url: URL, treeNodeID: String?) {
+    private func openFile(_ url: URL, treeNodeID: String?, asPreview: Bool) {
         let url = url.standardizedFileURL
         if let document = documents.first(where: {
             treeNodeID != nil ? $0.treeNodeID == treeNodeID : $0.url == url
-        }) {
+        }), !document.isReadOnly {
+            if !asPreview { document.promote() }
             activate(document)
             return
         }
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
-            let document = EditorDocument(url: url, text: text, treeNodeID: treeNodeID)
-            documents.append(document)
-            tabs.append(.document(document))
-            activate(document)
+            openDocument(
+                url: url,
+                text: text,
+                treeNodeID: treeNodeID,
+                asPreview: asPreview,
+                isReadOnly: false
+            )
         } catch {
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
     }
 
     func select(_ document: EditorDocument) {
+        invalidateDeletedPreviewRequest()
         activate(document)
+        refreshReadOnlySnapshotIfNeeded(document)
     }
 
     func select(_ terminal: TerminalSession) {
+        invalidateDeletedPreviewRequest()
         activateTab(id: terminal.id)
     }
 
@@ -555,6 +658,10 @@ final class WorkspaceModel: ObservableObject {
 
     func saveSelected() {
         guard let document = selectedDocument else { return }
+        guard !document.isReadOnly else {
+            errorMessage = "Cannot save read-only snapshot \(document.url.lastPathComponent)."
+            return
+        }
         do {
             try document.text.write(to: document.url, atomically: true, encoding: .utf8)
             document.markSaved()
@@ -563,7 +670,194 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
+    private func openDeletedSnapshot(_ node: FileNode, asPreview: Bool) {
+        if let document = documents.first(where: {
+            $0.treeNodeID == node.id
+                && $0.isReadOnly
+                && $0.snapshotFilterMode == fileFilterMode
+                && $0.snapshotComparisonRevision == fileFilterComparisonRevision
+        }) {
+            if !asPreview { document.promote() }
+            activate(document)
+            return
+        }
+        deletedPreviewTask?.cancel()
+        let requestID = UUID()
+        deletedPreviewRequestID = requestID
+        guard let rootURL, let gitQuery else {
+            errorMessage = "Cannot preview deleted file \(node.name) because Git content is unavailable."
+            return
+        }
+        let mode = fileFilterMode
+        deletedPreviewTask = Task { [weak self] in
+            do {
+                let data = try await gitQuery.fileContent(
+                    in: rootURL,
+                    path: node.id,
+                    mode: mode
+                )
+                guard !Task.isCancelled,
+                      let self,
+                      self.deletedPreviewRequestID == requestID,
+                      self.rootURL == rootURL,
+                      self.fileFilterMode == mode else { return }
+                guard let text = String(data: data, encoding: .utf8) else {
+                    self.errorMessage = "Cannot preview binary snapshot \(node.name)."
+                    return
+                }
+                self.openDocument(
+                    url: node.url,
+                    text: text,
+                    treeNodeID: node.id,
+                    asPreview: asPreview,
+                    isReadOnly: true,
+                    snapshotFilterMode: mode,
+                    snapshotComparisonRevision: self.fileFilterComparisonRevision
+                )
+                self.errorMessage = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      let self,
+                      self.deletedPreviewRequestID == requestID else { return }
+                self.errorMessage = "Could not preview \(node.name): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func invalidateDeletedPreviewRequest() {
+        deletedPreviewTask?.cancel()
+        deletedPreviewTask = nil
+        deletedPreviewRequestID = UUID()
+    }
+
+    private func openDocument(
+        url: URL,
+        text: String,
+        treeNodeID: String?,
+        asPreview: Bool,
+        isReadOnly: Bool,
+        snapshotFilterMode: FileExplorerFilterMode? = nil,
+        snapshotComparisonRevision: String? = nil
+    ) {
+        if let existing = documents.first(where: {
+            treeNodeID != nil ? $0.treeNodeID == treeNodeID : $0.url == url
+        }), existing.isReadOnly {
+            if isReadOnly,
+               let snapshotFilterMode,
+               let snapshotComparisonRevision {
+                existing.replaceReadOnlySnapshot(
+                    text: text,
+                    filterMode: snapshotFilterMode,
+                    comparisonRevision: snapshotComparisonRevision
+                )
+                if !asPreview { existing.promote() }
+                activate(existing)
+                return
+            }
+
+            let replacement = EditorDocument(
+                url: url,
+                text: text,
+                treeNodeID: treeNodeID,
+                isEphemeral: existing.isEphemeral && asPreview,
+                isReadOnly: false
+            )
+            if let documentIndex = documents.firstIndex(where: { $0.id == existing.id }) {
+                documents[documentIndex] = replacement
+            }
+            if let tabIndex = tabs.firstIndex(where: { $0.id == existing.id }) {
+                tabs[tabIndex] = .document(replacement)
+            }
+            activate(replacement)
+            return
+        }
+
+        let document = EditorDocument(
+            url: url,
+            text: text,
+            treeNodeID: treeNodeID,
+            isEphemeral: asPreview,
+            isReadOnly: isReadOnly,
+            snapshotFilterMode: snapshotFilterMode,
+            snapshotComparisonRevision: snapshotComparisonRevision
+        )
+        if asPreview,
+           let oldPreviewIndex = documents.firstIndex(where: {
+               $0.isEphemeral && !$0.isDirty
+           }),
+           let oldTabIndex = tabs.firstIndex(where: {
+               $0.id == documents[oldPreviewIndex].id
+           }) {
+            documents[oldPreviewIndex] = document
+            tabs[oldTabIndex] = .document(document)
+        } else {
+            documents.append(document)
+            tabs.append(.document(document))
+        }
+        activate(document)
+    }
+
+    private func refreshReadOnlySnapshotIfNeeded(_ document: EditorDocument) {
+        guard document.isReadOnly,
+              (document.snapshotFilterMode != fileFilterMode
+                || document.snapshotComparisonRevision != fileFilterComparisonRevision),
+              let path = document.treeNodeID,
+              let rootURL else { return }
+        openDeletedSnapshot(
+            FileNode(
+                id: path,
+                value: FileItem(
+                    url: rootURL.appendingPathComponent(path),
+                    change: GitFileChange(path: path, kind: .deleted)
+                ),
+                children: nil
+            ),
+            asPreview: document.isEphemeral
+        )
+    }
+
+    func selectFileFilter(_ mode: FileExplorerFilterMode) {
+        let currentExpansion = fileTree.expandedIDs
+        if !fileTree.roots.isEmpty {
+            fileExpansionIDsByMode[fileFilterMode] = currentExpansion
+        }
+        let didChangeMode = fileFilterMode != mode
+        if didChangeMode, fileExpansionIDsByMode[mode] == nil {
+            fileExpansionIDsByMode[mode] = currentExpansion
+        }
+        fileFilterMode = mode
+        if didChangeMode {
+            fileTree.replaceRoots([], initiallyExpandedLevels: 0)
+        }
+        requestFileFilterRefresh(forceRefresh: true)
+    }
+
+    func refreshFileFilter() {
+        requestFileFilterRefresh(forceRefresh: true)
+    }
+
+    func diffEditorConfiguration(for document: EditorDocument) -> DiffEditorConfiguration? {
+        guard let rootURL, let gitQuery else { return nil }
+        let context = DiffEditorContext(
+            projectURL: rootURL,
+            fileURL: document.url,
+            filterIdentity: fileFilterMode.rawValue,
+            currentText: document.text,
+            comparisonRevision: fileFilterComparisonRevision
+        )
+        return DiffEditorConfiguration(
+            isEnabled: isDiffOverlayEnabled,
+            context: context,
+            mode: fileFilterMode,
+            includeLiveText: !document.isReadOnly,
+            git: gitQuery
+        )
+    }
+
     private func activate(_ document: EditorDocument) {
+        invalidateDeletedPreviewRequest()
         selectedDocumentID = document.id
         selectedTabID = document.id
         lastSelectedDocumentID = document.id
@@ -641,7 +935,21 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func reloadFileTree(at url: URL) {
-        fileTree.replaceRoots(loadChildren(of: url, relativePath: ""))
+        if fileTreeRootURL != url {
+            fileTreeRootURL = url
+            fileExpansionIDsByMode = [:]
+        } else if !fileTree.roots.isEmpty {
+            fileExpansionIDsByMode[fileFilterMode] = fileTree.expandedIDs
+        }
+        if fileFilterMode == .full {
+            replaceFileTreeRoots(
+                loadChildren(of: url, relativePath: ""),
+                preserveCurrentExpansion: false
+            )
+        } else {
+            replaceFileTreeRoots([], preserveCurrentExpansion: false)
+        }
+        requestFileFilterRefresh(forceRefresh: false)
     }
 
     private func refreshFileTreePreservingExpansion() {
@@ -657,7 +965,11 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
-    private func loadChildren(of directory: URL, relativePath: String) -> [FileNode] {
+    private func loadChildren(
+        of directory: URL,
+        relativePath: String,
+        changesByPath: [String: GitFileChange] = [:]
+    ) -> [FileNode] {
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         let ignored = Set([".git", ".build", "DerivedData", ".DS_Store"])
         guard let urls = try? FileManager.default.contentsOfDirectory(
@@ -677,12 +989,221 @@ final class WorkspaceModel: ObservableObject {
                 return FileNode(
                     id: nodeID,
                     value: FileItem(url: url),
-                    children: loadChildren(of: url, relativePath: nodeID)
+                    children: loadChildren(
+                        of: url,
+                        relativePath: nodeID,
+                        changesByPath: changesByPath
+                    )
                 )
             }
             return values.isRegularFile == true
-                ? FileNode(id: nodeID, value: FileItem(url: url), children: nil)
+                ? FileNode(
+                    id: nodeID,
+                    value: FileItem(url: url, change: changesByPath[nodeID]),
+                    children: nil
+                )
                 : nil
+        }
+        .sorted {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private func requestFileFilterRefresh(forceRefresh: Bool) {
+        fileFilterTask?.cancel()
+        deletedPreviewTask?.cancel()
+        deletedPreviewRequestID = UUID()
+        let requestID = UUID()
+        fileFilterRequestID = requestID
+        fileFilterComparisonRevision = "refresh:\(requestID.uuidString)"
+        guard let rootURL else {
+            isFileFilterRefreshing = false
+            fileFilterStatusMessage = nil
+            fileFilterChangeCount = 0
+            return
+        }
+        guard let gitQuery else {
+            isFileFilterRefreshing = false
+            fileFilterChangeCount = 0
+            fileFilterStatusMessage = fileFilterMode == .full
+                ? nil
+                : "Git filters are unavailable."
+            return
+        }
+
+        let mode = fileFilterMode
+        isFileFilterRefreshing = true
+        fileFilterStatusMessage = "Refreshing \(mode.label)…"
+        fileFilterTask = Task { [weak self] in
+            do {
+                let snapshot = try await gitQuery.changes(
+                    in: rootURL,
+                    mode: mode,
+                    forceRefresh: forceRefresh
+                )
+                guard !Task.isCancelled else { return }
+                self?.applyFileFilterSnapshot(
+                    snapshot,
+                    requestID: requestID,
+                    rootURL: rootURL,
+                    mode: mode
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.applyFileFilterError(
+                    error,
+                    requestID: requestID,
+                    rootURL: rootURL,
+                    mode: mode
+                )
+            }
+        }
+    }
+
+    private func applyFileFilterSnapshot(
+        _ snapshot: GitChangeSnapshot,
+        requestID: UUID,
+        rootURL: URL,
+        mode: FileExplorerFilterMode
+    ) {
+        guard fileFilterRequestID == requestID,
+              self.rootURL == rootURL,
+              fileFilterMode == mode,
+              snapshot.mode == mode else { return }
+
+        let roots: [FileNode]
+        if mode == .full {
+            roots = loadChildren(
+                of: rootURL,
+                relativePath: "",
+                changesByPath: Dictionary(
+                    snapshot.changes.map { ($0.path, $0) },
+                    uniquingKeysWith: { _, newer in newer }
+                )
+            )
+        } else {
+            roots = filteredFileTree(snapshot.changes, rootURL: rootURL)
+        }
+        replaceFileTreeRoots(roots)
+        fileFilterComparisonRevision = comparisonRevision(for: snapshot)
+        if let document = selectedDocument,
+           document.isReadOnly,
+           let path = document.treeNodeID {
+            openDeletedSnapshot(
+                FileNode(
+                    id: path,
+                    value: FileItem(
+                        url: rootURL.appendingPathComponent(path),
+                        change: GitFileChange(path: path, kind: .deleted)
+                    ),
+                    children: nil
+                ),
+                asPreview: document.isEphemeral
+            )
+        }
+        fileFilterChangeCount = snapshot.changes.count
+        isFileFilterRefreshing = false
+        if case .noParent(let message) = snapshot.parentState {
+            fileFilterStatusMessage = message
+        } else {
+            let suffix = snapshot.changes.count == 1 ? "file" : "files"
+            fileFilterStatusMessage = "\(snapshot.changes.count) changed \(suffix)"
+        }
+        revealSelectedDocument()
+    }
+
+    private func applyFileFilterError(
+        _ error: Error,
+        requestID: UUID,
+        rootURL: URL,
+        mode: FileExplorerFilterMode
+    ) {
+        guard fileFilterRequestID == requestID,
+              self.rootURL == rootURL,
+              fileFilterMode == mode else { return }
+        isFileFilterRefreshing = false
+        fileFilterChangeCount = 0
+        if mode == .full {
+            fileFilterStatusMessage = nil
+        } else {
+            fileFilterStatusMessage = "Could not refresh \(mode.label): \(error.localizedDescription)"
+            replaceFileTreeRoots([])
+        }
+    }
+
+    private func comparisonRevision(for snapshot: GitChangeSnapshot) -> String {
+        let parent: String
+        switch snapshot.parentState {
+        case .resolved(let reference, let mergeBase):
+            parent = "\(reference):\(mergeBase)"
+        case .noParent(let message):
+            parent = "no-parent:\(message)"
+        case nil:
+            parent = "no-parent-context"
+        }
+        return "\(snapshot.contextID):\(snapshot.mode.rawValue):\(parent)"
+    }
+
+    private func replaceFileTreeRoots(
+        _ roots: [FileNode],
+        preserveCurrentExpansion: Bool = true
+    ) {
+        if preserveCurrentExpansion, !fileTree.roots.isEmpty {
+            fileExpansionIDsByMode[fileFilterMode] = fileTree.expandedIDs
+        }
+        fileTree.replaceRoots(roots)
+        if let expandedIDs = fileExpansionIDsByMode[fileFilterMode] {
+            fileTree.restoreExpandedIDs(expandedIDs)
+        }
+    }
+
+    private func filteredFileTree(
+        _ changes: [GitFileChange],
+        rootURL: URL
+    ) -> [FileNode] {
+        let root = FilteredFileTreeEntry()
+        for change in changes {
+            let components = change.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard !components.isEmpty,
+                  components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+                continue
+            }
+            var entry = root
+            for component in components {
+                let name = String(component)
+                if entry.children[name] == nil {
+                    entry.children[name] = FilteredFileTreeEntry()
+                }
+                entry = entry.children[name]!
+            }
+            entry.change = change
+        }
+        return filteredFileNodes(in: root, path: "", rootURL: rootURL)
+    }
+
+    private func filteredFileNodes(
+        in entry: FilteredFileTreeEntry,
+        path: String,
+        rootURL: URL
+    ) -> [FileNode] {
+        entry.children.map { name, child in
+            let childPath = path.isEmpty ? name : path + "/" + name
+            let url = rootURL.appendingPathComponent(childPath)
+            if child.children.isEmpty {
+                return FileNode(
+                    id: childPath,
+                    value: FileItem(url: url, change: child.change),
+                    children: nil
+                )
+            }
+            return FileNode(
+                id: childPath,
+                value: FileItem(url: url),
+                children: filteredFileNodes(in: child, path: childPath, rootURL: rootURL)
+            )
         }
         .sorted {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
@@ -793,6 +1314,16 @@ final class WorkspaceModel: ObservableObject {
         }
 
         guard isActive else { return }
+        fileFilterTask?.cancel()
+        deletedPreviewTask?.cancel()
+        fileFilterRequestID = UUID()
+        deletedPreviewRequestID = UUID()
+        isFileFilterRefreshing = false
+        fileFilterStatusMessage = nil
+        fileFilterChangeCount = 0
+        fileFilterComparisonRevision = "unloaded"
+        fileTreeRootURL = nil
+        fileExpansionIDsByMode = [:]
         rootURL = nil
         fileTree.replaceRoots([])
         documents = []
@@ -832,6 +1363,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func activateTab(id: UUID) {
+        invalidateDeletedPreviewRequest()
         selectedTabID = id
         if let document = tabs.first(where: { $0.id == id })?.document {
             selectedDocumentID = document.id

@@ -159,6 +159,24 @@ func registerBuiltInCommands(
     ) { _ in
         workspace.closeSelected()
     }
+
+    try commandManager.add(
+        id: "git:toggle-diff",
+        viewKinds: Set(CommandViewKind.allCases),
+        predicate: workspaceAvailable
+    ) { _ in
+        workspace.isDiffOverlayEnabled.toggle()
+    }
+
+    for mode in FileExplorerFilterMode.allCases {
+        try commandManager.add(
+            id: "git:filter-\(mode.rawValue)",
+            viewKinds: Set(CommandViewKind.allCases),
+            predicate: workspaceAvailable
+        ) { _ in
+            workspace.selectFileFilter(mode)
+        }
+    }
 }
 
 @MainActor
