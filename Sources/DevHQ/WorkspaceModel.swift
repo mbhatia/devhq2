@@ -14,6 +14,7 @@ enum WorkspaceCommandOperationError: LocalizedError, Equatable {
     case outsideWorkspace(URL)
     case targetExists(URL)
     case parentDirectoryMissing(URL)
+    case invalidTerminalWorkingDirectory(URL)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ enum WorkspaceCommandOperationError: LocalizedError, Equatable {
             "\(url.lastPathComponent) already exists."
         case .parentDirectoryMissing(let url):
             "The parent directory \(url.path) does not exist."
+        case .invalidTerminalWorkingDirectory(let url):
+            "Terminal working directory does not exist or is not a directory: \(url.path)"
         }
     }
 }
@@ -342,9 +345,29 @@ final class WorkspaceModel: ObservableObject {
     }
 
     @discardableResult
-    func newTerminal(shell: String? = nil) throws -> TerminalSession {
+    func newTerminal(
+        workingDirectory: URL? = nil,
+        command: [String]? = nil,
+        shell: String? = nil
+    ) throws -> TerminalSession {
         guard let rootURL else { throw WorkspaceCommandOperationError.noWorkspace }
-        let terminal = try TerminalSession(rootURL: rootURL, shell: shell)
+        let workingDirectory = (workingDirectory ?? rootURL)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: workingDirectory.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            throw WorkspaceCommandOperationError.invalidTerminalWorkingDirectory(workingDirectory)
+        }
+
+        let terminal = try TerminalSession(
+            rootURL: rootURL,
+            workingDirectory: workingDirectory,
+            command: command,
+            shell: shell
+        )
         tabs.append(.terminal(terminal))
         activateTab(id: terminal.id)
         errorMessage = nil

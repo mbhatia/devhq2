@@ -22,6 +22,7 @@ The `devhq` module follows the same broad separation used by Lite XL:
 - `split`: horizontal or vertical pane direction
 - `treeview`: visibility and pane size
 - `docview`: gutter, minimap, and folding-ribbon visibility
+- `terminal`: terminal-tab creation
 
 Lua modules below the configuration directory can be loaded normally. For example,
 `require "plugins.statusbar"` loads `~/.config/devhq/plugins/statusbar.lua`. See
@@ -81,6 +82,25 @@ or run `terminal:new` from the command palette. Terminals start a login shell in
 the active worktree, remain alive while switching worktrees, and terminate when
 their tab or DevHQ closes. Terminal tabs are intentionally not restored after an
 application restart.
+
+Lua plugins can create and select a terminal with an optional working directory
+and command:
+
+```lua
+local devhq = require "devhq"
+local terminal = require "terminal" -- the same table as devhq.terminal
+
+local terminal_id = terminal.new({
+  cwd = "Sources", -- relative to the active worktree, or an absolute path
+  command = { "/bin/zsh", "-lc", "swift test" },
+})
+```
+
+`terminal.new()` starts the normal login shell in the active worktree. The
+`command` value is a non-empty argument array and is executed directly without
+shell interpolation; invoke a shell explicitly, as above, when shell syntax is
+needed. The returned string is the terminal tab's UUID. Lua configuration is
+trusted, so an absolute `cwd` may point outside the active worktree.
 
 The native VT dependency is built locally and is not committed as a binary. On a
 new checkout, initialize the pinned submodule and bootstrap it before building:

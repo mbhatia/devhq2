@@ -32,6 +32,7 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     private var markedText = NSMutableAttributedString()
     private var selectionStart: (column: Int, row: Int)?
     private var selectionEnd: (column: Int, row: Int)?
+    private var contextMenuLinkPoint: (column: Int, row: Int)?
     private var applicationMouseTracking = false
 
     init(session: TerminalSession) {
@@ -122,7 +123,9 @@ final class NativeTerminalView: NSView, NSTextInputClient {
                     .font: cell.bold ? boldFont : (cell.italic ? italicFont : font),
                     .foregroundColor: foreground
                 ]
-                if cell.underline { attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+                if cell.underline || cell.hyperlink != nil {
+                    attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                }
                 if cell.strikethrough {
                     attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
                 }
@@ -184,6 +187,15 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.contains(.command),
+           let gridPoint = gridPointIfInside(for: point),
+           session.openHyperlink(at: gridPoint) {
+            applicationMouseTracking = false
+            selectionStart = nil
+            selectionEnd = nil
+            needsDisplay = true
+            return
+        }
         if !event.modifierFlags.contains(.shift), session.sendMouse(
             action: 0,
             button: 1,
@@ -234,11 +246,44 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         if lines != 0 { session.scroll(lines: lines) }
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let gridPoint = gridPointIfInside(for: point),
+              snapshot.cells.indices.contains(gridPoint.row),
+              snapshot.cells[gridPoint.row].indices.contains(gridPoint.column),
+              snapshot.cells[gridPoint.row][gridPoint.column].hyperlink != nil else {
+            contextMenuLinkPoint = nil
+            return nil
+        }
+        contextMenuLinkPoint = gridPoint
+        let menu = NSMenu()
+        let item = NSMenuItem(
+            title: "Open Link",
+            action: #selector(openContextMenuLink),
+            keyEquivalent: ""
+        )
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func openContextMenuLink() {
+        guard let contextMenuLinkPoint else { return }
+        _ = session.openHyperlink(at: contextMenuLinkPoint)
+    }
+
     private func gridPoint(for point: NSPoint) -> (column: Int, row: Int) {
         (
             max(0, min(snapshot.columns - 1, Int(point.x / cellWidth))),
             max(0, min(snapshot.rows - 1, Int(point.y / cellHeight)))
         )
+    }
+
+    private func gridPointIfInside(for point: NSPoint) -> (column: Int, row: Int)? {
+        guard point.x >= 0, point.y >= 0,
+              point.x < CGFloat(snapshot.columns) * cellWidth,
+              point.y < CGFloat(snapshot.rows) * cellHeight else { return nil }
+        return (Int(point.x / cellWidth), Int(point.y / cellHeight))
     }
 
     private func isSelected(column: Int, row: Int) -> Bool {

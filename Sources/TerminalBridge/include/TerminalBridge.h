@@ -35,12 +35,15 @@ enum {
     DEVHQ_TERMINAL_CELL_UNDERLINE = 1 << 2,
     DEVHQ_TERMINAL_CELL_STRIKETHROUGH = 1 << 3,
     DEVHQ_TERMINAL_CELL_INVERSE = 1 << 4,
+    DEVHQ_TERMINAL_CELL_HYPERLINK = 1 << 5,
 };
 
 DevHQTerminal *devhq_terminal_create(
     const char *cwd,
     const char *shell,
     const char *terminfo,
+    char *const *argv,
+    size_t argv_count,
     uint16_t columns,
     uint16_t rows,
     uint32_t pixel_width,
@@ -62,6 +65,12 @@ bool devhq_terminal_snapshot(
     DevHQTerminalCell *cells,
     size_t capacity,
     DevHQTerminalSnapshot *snapshot);
+size_t devhq_terminal_hyperlink_at(
+    DevHQTerminal *terminal,
+    uint16_t column,
+    uint16_t row,
+    uint8_t *buffer,
+    size_t capacity);
 bool devhq_terminal_key(DevHQTerminal *terminal, int key, uint16_t modifiers);
 bool devhq_terminal_paste(DevHQTerminal *terminal, const char *text, size_t count);
 bool devhq_terminal_focus(DevHQTerminal *terminal, bool focused);

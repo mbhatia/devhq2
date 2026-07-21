@@ -29,9 +29,9 @@ struct DevHQApp: App {
         let commandManager = CommandManager()
         let commandPalette = CommandPaletteController(commandManager: commandManager)
         let commandContext = CommandContextTracker()
-        let plugins = LuaPluginHost(commandManager: commandManager)
         let stateStore = WorkspaceStateStore()
         let workspace = WorkspaceModel(stateStore: stateStore)
+        let plugins = LuaPluginHost(commandManager: commandManager, workspace: workspace)
         let worktreeExplorer = WorktreeExplorerModel(
             discoverer: LibGit2WorktreeService(),
             onActivate: { repository, worktree in
@@ -60,15 +60,15 @@ struct DevHQApp: App {
             plugins.settings.pluginError =
                 "Could not register built-in commands: \(error.localizedDescription)"
         }
-        plugins.loadUserConfiguration()
-        let layout = WorkspaceLayoutModel(
-            fileExplorerFallbackWidth: plugins.settings.treeViewSize
-        )
         let hasExplicitCommandLineWorkspace = Self.argumentValue(after: "--workspace") != nil
         worktreeExplorer.restore(activateSelection: !hasExplicitCommandLineWorkspace)
         if hasExplicitCommandLineWorkspace {
             worktreeExplorer.syncSelection(with: workspace.rootURL)
         }
+        plugins.loadUserConfiguration()
+        let layout = WorkspaceLayoutModel(
+            fileExplorerFallbackWidth: plugins.settings.treeViewSize
+        )
         _commandManager = StateObject(wrappedValue: commandManager)
         _commandPalette = StateObject(wrappedValue: commandPalette)
         _commandContext = StateObject(wrappedValue: commandContext)

@@ -102,7 +102,7 @@ final class DevHQTests: XCTestCase {
         let script = """
         local devhq = require "devhq"
         local layout = require "plugins.layout"
-        assert(devhq.core.api_version == "0.1")
+        assert(devhq.core.api_version == "0.2")
         devhq.window.theme = "dark"
         layout.apply(devhq)
         devhq.split.direction = "vertical"

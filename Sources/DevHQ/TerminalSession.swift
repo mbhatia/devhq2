@@ -1,6 +1,58 @@
 import AppKit
 import Foundation
 import TerminalBridge
+@preconcurrency import UserNotifications
+
+@MainActor
+protocol TerminalHostServices: AnyObject {
+    func open(url: URL)
+    func showNotification(title: String, body: String)
+    func writeClipboard(_ string: String)
+}
+
+@MainActor
+final class SystemTerminalHostServices: TerminalHostServices {
+    static let shared = SystemTerminalHostServices()
+    private var lastNotificationDate = Date.distantPast
+
+    private init() {}
+
+    func open(url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    func showNotification(title: String, body: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastNotificationDate) >= 1 else { return }
+        lastNotificationDate = now
+        guard Bundle.main.bundleURL.pathExtension.lowercased() == "app",
+              Bundle.main.bundleIdentifier != nil else {
+            NSApplication.shared.requestUserAttention(.informationalRequest)
+            NSSound.beep()
+            return
+        }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            center.add(UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: nil
+            ))
+        }
+    }
+
+    func writeClipboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        if !string.isEmpty {
+            NSPasteboard.general.setString(string, forType: .string)
+        }
+    }
+}
 
 struct TerminalRGB: Equatable, Sendable {
     let red: UInt8
@@ -27,6 +79,7 @@ struct TerminalCell: Equatable, Sendable {
     var strikethrough = false
     var inverse = false
     var width: UInt8 = 1
+    var hyperlink: String?
 }
 
 enum TerminalCursorStyle: Equatable, Sendable {
@@ -79,23 +132,51 @@ final class TerminalSession: ObservableObject, Identifiable {
     private var nativeHandle: OpaquePointer?
     private var timer: Timer?
     private var parser = TerminalParser(columns: 80, rows: 24)
+    private let hostServices: TerminalHostServices
+    private var pendingNotification: (title: String, body: String)?
+    private var lastNotificationDate = Date.distantPast
     private var active = true
     private var closed = false
 
-    init(rootURL: URL, shell: String? = nil) throws {
+    init(
+        rootURL: URL,
+        workingDirectory: URL? = nil,
+        command: [String]? = nil,
+        shell: String? = nil,
+        hostServices: TerminalHostServices? = nil
+    ) throws {
+        let workingDirectory = workingDirectory ?? rootURL
+        let command = command?.isEmpty == false ? command : nil
+        guard command?.contains(where: { $0.utf8.contains(0) }) != true else {
+            throw TerminalSessionError.couldNotStart
+        }
         self.rootURL = rootURL
-        self.currentDirectory = rootURL
+        self.currentDirectory = workingDirectory
+        self.hostServices = hostServices ?? SystemTerminalHostServices.shared
         let shell = shell ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let terminfo = Bundle.module.resourceURL?
             .appendingPathComponent("Resources/terminfo", isDirectory: true).path
-        nativeHandle = rootURL.path.withCString { cwd in
-            shell.withCString { shell in
-                if let terminfo {
-                    return terminfo.withCString {
-                        devhq_terminal_create(cwd, shell, $0, 80, 24, 0, 0)
+        let argumentPointers = command?.map { strdup($0) } ?? []
+        defer { argumentPointers.forEach { free($0) } }
+        guard !argumentPointers.contains(where: { $0 == nil }) else {
+            throw TerminalSessionError.couldNotStart
+        }
+        nativeHandle = argumentPointers.withUnsafeBufferPointer { arguments in
+            workingDirectory.path.withCString { cwd in
+                shell.withCString { shell in
+                    if let terminfo {
+                        return terminfo.withCString {
+                            devhq_terminal_create(
+                                cwd, shell, $0, arguments.baseAddress, arguments.count,
+                                80, 24, 0, 0
+                            )
+                        }
                     }
+                    return devhq_terminal_create(
+                        cwd, shell, nil, arguments.baseAddress, arguments.count,
+                        80, 24, 0, 0
+                    )
                 }
-                return devhq_terminal_create(cwd, shell, nil, 80, 24, 0, 0)
             }
         }
         guard let nativeHandle else { throw TerminalSessionError.couldNotStart }
@@ -240,6 +321,12 @@ final class TerminalSession: ObservableObject, Identifiable {
         parser.text(from: start, to: end)
     }
 
+    func openHyperlink(at point: (column: Int, row: Int)) -> Bool {
+        guard let url = hyperlink(at: point) else { return false }
+        hostServices.open(url: url)
+        return true
+    }
+
     func close() {
         guard !closed else { return }
         closed = true
@@ -263,6 +350,15 @@ final class TerminalSession: ObservableObject, Identifiable {
             parser.feed(buffer.prefix(Int(count)))
             changed = true
         }
+        for effect in parser.takeEffects() {
+            switch effect {
+            case let .notification(title, body):
+                pendingNotification = (title, body)
+            case let .clipboardWrite(string):
+                hostServices.writeClipboard(string)
+            }
+        }
+        deliverPendingNotification()
         if exitStatus == nil {
             var status: Int32 = 0
             if devhq_terminal_poll_exit(nativeHandle, &status) {
@@ -275,12 +371,60 @@ final class TerminalSession: ObservableObject, Identifiable {
         if changed, active { publishParserState() }
     }
 
+    private func deliverPendingNotification() {
+        guard let pendingNotification else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastNotificationDate) >= 1 else { return }
+        self.pendingNotification = nil
+        lastNotificationDate = now
+        hostServices.showNotification(
+            title: pendingNotification.title,
+            body: pendingNotification.body
+        )
+    }
+
     private func publishParserState() {
         if let ghosttySnapshot = makeGhosttySnapshot() {
             snapshot = ghosttySnapshot
         } else {
             snapshot = parser.snapshot()
         }
+    }
+
+    private func hyperlink(at point: (column: Int, row: Int)) -> URL? {
+        guard point.column >= 0, point.row >= 0 else { return nil }
+        var value: String?
+        if let nativeHandle, devhq_terminal_uses_ghostty(),
+           point.column <= Int(UInt16.max), point.row <= Int(UInt16.max) {
+            let required = devhq_terminal_hyperlink_at(
+                nativeHandle,
+                UInt16(point.column),
+                UInt16(point.row),
+                nil,
+                0
+            )
+            if required > 0, required <= 64 * 1024 {
+                var bytes = [UInt8](repeating: 0, count: required)
+                let copied = bytes.withUnsafeMutableBufferPointer {
+                    devhq_terminal_hyperlink_at(
+                        nativeHandle,
+                        UInt16(point.column),
+                        UInt16(point.row),
+                        $0.baseAddress,
+                        $0.count
+                    )
+                }
+                if copied == required { value = String(bytes: bytes, encoding: .utf8) }
+            }
+        } else {
+            let fallback = parser.snapshot()
+            if fallback.cells.indices.contains(point.row),
+               fallback.cells[point.row].indices.contains(point.column) {
+                value = fallback.cells[point.row][point.column].hyperlink
+            }
+        }
+        guard let value, let url = URL(string: value), url.scheme != nil else { return nil }
+        return url
     }
 
     private func makeGhosttySnapshot() -> TerminalRenderSnapshot? {
@@ -347,7 +491,8 @@ final class TerminalSession: ObservableObject, Identifiable {
             underline: native.flags & UInt8(DEVHQ_TERMINAL_CELL_UNDERLINE) != 0,
             strikethrough: native.flags & UInt8(DEVHQ_TERMINAL_CELL_STRIKETHROUGH) != 0,
             inverse: native.flags & UInt8(DEVHQ_TERMINAL_CELL_INVERSE) != 0,
-            width: native.width
+            width: native.width,
+            hyperlink: native.flags & UInt8(DEVHQ_TERMINAL_CELL_HYPERLINK) != 0 ? "" : nil
         )
     }
 }
@@ -357,11 +502,21 @@ enum TerminalSpecialKey: Int32 {
     case backspace, tab, returnKey, escape
 }
 
-private struct TerminalParser {
+enum TerminalEffect: Equatable {
+    case notification(title: String, body: String)
+    case clipboardWrite(String)
+}
+
+struct TerminalParser {
+    private static let maxOSCBytes = 1024 * 1024
     private enum State { case ground, escape, csi, osc, oscEscape }
     private var state = State.ground
     private var sequence: [UInt8] = []
     private var printable: [UInt8] = []
+    private var groundUTF8ContinuationCount = 0
+    private var oscUTF8ContinuationCount = 0
+    private var oscOverflowed = false
+    private var pendingEffects: [TerminalEffect] = []
     private var cells: [[TerminalCell]]
     private var history: [[TerminalCell]] = []
     private var alternateCells: [[TerminalCell]]?
@@ -371,6 +526,7 @@ private struct TerminalParser {
     private var column = 0
     private var row = 0
     private var style = TerminalCell()
+    private var currentHyperlink: String?
     private var cursorVisible = true
     private var cursorStyle = TerminalCursorStyle.block
     private var scrollOffset = 0
@@ -389,18 +545,28 @@ private struct TerminalParser {
         for byte in bytes {
             switch state {
             case .ground:
+                if groundUTF8ContinuationCount > 0 {
+                    printable.append(byte)
+                    groundUTF8ContinuationCount -= 1
+                    continue
+                }
                 switch byte {
                 case 0x1b: flushPrintable(); state = .escape
+                case 0x9d: flushPrintable(); startOSC()
                 case 0x0d: flushPrintable(); column = 0
                 case 0x0a, 0x0b, 0x0c: flushPrintable(); lineFeed()
                 case 0x08: flushPrintable(); column = max(0, column - 1)
                 case 0x09: flushPrintable(); column = min(columns - 1, ((column / 8) + 1) * 8)
-                case 0x20...0xff: printable.append(byte)
+                case 0x20...0xff:
+                    printable.append(byte)
+                    groundUTF8ContinuationCount = Self.utf8ContinuationCount(after: byte)
                 default: flushPrintable()
                 }
             case .escape:
                 if byte == 0x5b { sequence.removeAll(keepingCapacity: true); state = .csi }
-                else if byte == 0x5d { sequence.removeAll(keepingCapacity: true); state = .osc }
+                else if byte == 0x5d {
+                    startOSC()
+                }
                 else if byte == 0x37 { savedCursor = (column, row); state = .ground }
                 else if byte == 0x38 { (column, row) = savedCursor; state = .ground }
                 else if byte == 0x44 { lineFeed(); state = .ground }
@@ -414,15 +580,32 @@ private struct TerminalParser {
                     state = .ground
                 } else { sequence.append(byte) }
             case .osc:
-                if byte == 0x07 { handleOSC(); state = .ground }
+                if oscUTF8ContinuationCount > 0 {
+                    appendOSC(byte)
+                    oscUTF8ContinuationCount -= 1
+                }
+                else if byte == 0x07 || byte == 0x9c { finishOSC(); state = .ground }
                 else if byte == 0x1b { state = .oscEscape }
-                else { sequence.append(byte) }
+                else {
+                    appendOSC(byte)
+                    oscUTF8ContinuationCount = Self.utf8ContinuationCount(after: byte)
+                }
             case .oscEscape:
-                if byte == 0x5c { handleOSC(); state = .ground }
-                else { sequence.append(0x1b); sequence.append(byte); state = .osc }
+                if byte == 0x5c { finishOSC(); state = .ground }
+                else {
+                    appendOSC(0x1b)
+                    appendOSC(byte)
+                    oscUTF8ContinuationCount = Self.utf8ContinuationCount(after: byte)
+                    state = .osc
+                }
             }
         }
         flushPrintable()
+    }
+
+    mutating func takeEffects() -> [TerminalEffect] {
+        defer { pendingEffects.removeAll(keepingCapacity: true) }
+        return pendingEffects
     }
 
     mutating func resize(columns newColumns: Int, rows newRows: Int) {
@@ -492,11 +675,13 @@ private struct TerminalParser {
         var cell = style
         cell.text = String(character)
         cell.width = character.unicodeScalars.contains { $0.properties.isEmojiPresentation } ? 2 : 1
+        cell.hyperlink = currentHyperlink
         cells[row][column] = cell
         if cell.width == 2, column + 1 < columns {
             var spacer = style
             spacer.text = ""
             spacer.width = 0
+            spacer.hyperlink = currentHyperlink
             cells[row][column + 1] = spacer
         }
         column += Int(cell.width)
@@ -526,6 +711,7 @@ private struct TerminalParser {
         column = 0
         row = 0
         style = TerminalCell()
+        currentHyperlink = nil
         cursorVisible = true
         cursorStyle = .block
     }
@@ -627,6 +813,63 @@ private struct TerminalParser {
         let content = String(value[value.index(after: separator)...])
         if command == "0" || command == "2" { title = content.isEmpty ? "Terminal" : content }
         if command == "7", let url = URL(string: content), url.isFileURL { currentDirectory = url }
+        if command == "8" {
+            let fields = content.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            guard fields.count == 2 else { return }
+            currentHyperlink = fields[1].isEmpty ? nil : String(fields[1])
+        }
+        if command == "9", !content.isEmpty {
+            enqueue(.notification(
+                title: title == "Terminal" ? "DevHQ Terminal" : title,
+                body: content
+            ))
+        }
+        if command == "52" {
+            let fields = content.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            guard fields.count == 2, fields[1] != "?",
+                  let data = Data(base64Encoded: String(fields[1]), options: []),
+                  let string = String(data: data, encoding: .utf8) else { return }
+            enqueue(.clipboardWrite(string))
+        }
+    }
+
+    private mutating func enqueue(_ effect: TerminalEffect) {
+        let matchingIndex = pendingEffects.firstIndex {
+            switch ($0, effect) {
+            case (.notification, .notification), (.clipboardWrite, .clipboardWrite): true
+            default: false
+            }
+        }
+        if let matchingIndex { pendingEffects[matchingIndex] = effect }
+        else { pendingEffects.append(effect) }
+    }
+
+    private mutating func startOSC() {
+        sequence.removeAll(keepingCapacity: true)
+        oscOverflowed = false
+        oscUTF8ContinuationCount = 0
+        state = .osc
+    }
+
+    private mutating func appendOSC(_ byte: UInt8) {
+        if sequence.count < Self.maxOSCBytes { sequence.append(byte) }
+        else { oscOverflowed = true }
+    }
+
+    private mutating func finishOSC() {
+        if oscOverflowed { sequence.removeAll(keepingCapacity: true) }
+        else { handleOSC() }
+        oscOverflowed = false
+        oscUTF8ContinuationCount = 0
+    }
+
+    private static func utf8ContinuationCount(after byte: UInt8) -> Int {
+        switch byte {
+        case 0xc2...0xdf: 1
+        case 0xe0...0xef: 2
+        case 0xf0...0xf4: 3
+        default: 0
+        }
     }
 
     private mutating func setAlternateScreen(_ enabled: Bool) {

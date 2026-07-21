@@ -42,11 +42,16 @@ DevHQTerminal *devhq_terminal_create(
     const char *cwd,
     const char *shell,
     const char *terminfo,
+    char *const *argv,
+    size_t argv_count,
     uint16_t columns,
     uint16_t rows,
     uint32_t pixel_width,
     uint32_t pixel_height) {
-    if (!cwd || !shell) return NULL;
+    if (!cwd || !shell || argv_count > 1024 || (argv_count > 0 && !argv)) return NULL;
+    for (size_t index = 0; index < argv_count; ++index) {
+        if (!argv[index]) return NULL;
+    }
     DevHQTerminal *terminal = calloc(1, sizeof(*terminal));
     if (!terminal) return NULL;
 #ifdef DEVHQ_USE_GHOSTTY
@@ -94,11 +99,19 @@ DevHQTerminal *devhq_terminal_create(
     }
     if (pid == 0) {
         (void)setsid();
-        (void)chdir(cwd);
+        if (chdir(cwd) != 0) _exit(127);
+        setenv("PWD", cwd, 1);
         bool has_terminfo = terminfo && terminfo[0] && access(terminfo, F_OK) == 0;
         setenv("TERM", has_terminfo ? "xterm-ghostty" : "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
         if (has_terminfo) setenv("TERMINFO", terminfo, 1);
+        if (argv_count > 0) {
+            char *child_argv[argv_count + 1];
+            for (size_t index = 0; index < argv_count; ++index) child_argv[index] = argv[index];
+            child_argv[argv_count] = NULL;
+            execvp(child_argv[0], child_argv);
+            _exit(127);
+        }
         execl(shell, shell, "-l", (char *)NULL);
         _exit(127);
     }
@@ -392,6 +405,9 @@ bool devhq_terminal_snapshot(
             (void)ghostty_render_state_row_cells_get(row_cells,
                 GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw);
             (void)ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &wide);
+            bool has_hyperlink = false;
+            (void)ghostty_cell_get(raw, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &has_hyperlink);
+            if (has_hyperlink) output->flags |= DEVHQ_TERMINAL_CELL_HYPERLINK;
             output->width = wide == GHOSTTY_CELL_WIDE_WIDE ? 2 :
                 (wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ? 0 : 1);
             GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
@@ -429,5 +445,33 @@ fail:
     ghostty_render_state_row_cells_free(row_cells);
     ghostty_render_state_row_iterator_free(iterator);
     return false;
+#endif
+}
+
+size_t devhq_terminal_hyperlink_at(
+    DevHQTerminal *terminal,
+    uint16_t column,
+    uint16_t row,
+    uint8_t *buffer,
+    size_t capacity) {
+#ifndef DEVHQ_USE_GHOSTTY
+    (void)terminal; (void)column; (void)row; (void)buffer; (void)capacity;
+    return 0;
+#else
+    if (!terminal) return 0;
+    GhosttyPoint point = {0};
+    point.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+    point.value.coordinate.x = column;
+    point.value.coordinate.y = row;
+    GhosttyGridRef reference = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    if (ghostty_terminal_grid_ref(terminal->ghostty, point, &reference) != GHOSTTY_SUCCESS)
+        return 0;
+    size_t required = 0;
+    GhosttyResult result = ghostty_grid_ref_hyperlink_uri(&reference, NULL, 0, &required);
+    if (result != GHOSTTY_SUCCESS && result != GHOSTTY_OUT_OF_SPACE) return 0;
+    if (required == 0 || !buffer || capacity < required) return required;
+    size_t written = 0;
+    result = ghostty_grid_ref_hyperlink_uri(&reference, buffer, capacity, &written);
+    return result == GHOSTTY_SUCCESS ? written : 0;
 #endif
 }
