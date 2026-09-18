@@ -367,11 +367,18 @@ public actor GitQueryService: GitQuerying {
             guard case let .resolved(_, mergeBase) = parent else {
                 return DiffComparison(arguments: nil, liveTextBase: nil, parentState: parent)
             }
+            let arguments: [String]
+            let liveTextBase: String?
+            if request.mode == .head {
+                arguments = ["diff"] + common + ["\(mergeBase)..HEAD"] + path
+                liveTextBase = nil
+            } else {
+                arguments = ["diff"] + common + [mergeBase] + path
+                liveTextBase = mergeBase
+            }
             return DiffComparison(
-                arguments: request.mode == .head
-                    ? ["diff"] + common + ["\(mergeBase)..HEAD"] + path
-                    : ["diff"] + common + [mergeBase] + path,
-                liveTextBase: request.mode == .full ? mergeBase : nil,
+                arguments: arguments,
+                liveTextBase: liveTextBase,
                 parentState: parent
             )
         }
