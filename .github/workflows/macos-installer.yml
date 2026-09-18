@@ -3,6 +3,8 @@ name: Build macOS installer
 on:
   pull_request:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -50,13 +52,13 @@ jobs:
           echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Configure ad-hoc signing
-        if: github.event_name == 'pull_request'
+        if: github.ref_type != 'tag'
         run: |
           echo 'SIGN_IDENTITY=-' >> "$GITHUB_ENV"
           echo 'CODESIGN_OPTIONS=' >> "$GITHUB_ENV"
 
       - name: Import Developer ID certificate
-        if: github.event_name != 'pull_request'
+        if: github.ref_type == 'tag'
         env:
           APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -115,15 +117,15 @@ jobs:
           dmg="dist/DevHQ-macos-arm64.dmg"
           test -f "$dmg"
 
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            codesign --force --sign - "$dmg"
-          else
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             codesign --force --sign "$SIGN_IDENTITY" --timestamp "$dmg"
+          else
+            codesign --force --sign - "$dmg"
           fi
           codesign --verify --strict --verbose=2 "$dmg"
 
       - name: Notarize, staple, and validate DMG
-        if: github.event_name != 'pull_request'
+        if: github.ref_type == 'tag'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -201,7 +203,7 @@ jobs:
           done
 
           codesign --verify --deep --strict --verbose=2 "$app"
-          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             spctl --assess --type execute -vv "$app"
           fi
 
@@ -213,7 +215,7 @@ jobs:
           if-no-files-found: error
 
       - name: Remove temporary signing keychain
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.ref_type == 'tag'
         run: |
           if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" ]]; then
             security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
