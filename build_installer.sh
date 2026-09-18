@@ -256,7 +256,15 @@ hdiutil create \
   -format UDZO \
   -ov \
   "$OUTPUT_DMG" >/dev/null
-hdiutil verify "$OUTPUT_DMG" >/dev/null
+verified=0
+for attempt in 1 2 3 4 5; do
+  if hdiutil verify "$OUTPUT_DMG" >/dev/null; then
+    verified=1
+    break
+  fi
+  [ "$attempt" -eq 5 ] || sleep "$attempt"
+done
+[ "$verified" -eq 1 ] || die "failed to verify $OUTPUT_DMG after 5 attempts"
 mkdir -p "$MOUNT_DIR"
 log "Mounting the DMG for final verification..."
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_DIR" "$OUTPUT_DMG" >/dev/null
