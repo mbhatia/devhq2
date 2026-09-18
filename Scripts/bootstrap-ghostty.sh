@@ -63,7 +63,8 @@ mkdir -p "$terminfo"
 cp -R "$ghostty/zig-out/share/terminfo/." "$terminfo/"
 
 case "${1:-build}" in
+  bootstrap) exit 0 ;;
   build) exec swift build ;;
   test) exec swift test ;;
-  *) echo "usage: $0 [build|test]" >&2; exit 2 ;;
+  *) echo "usage: $0 [bootstrap|build|test]" >&2; exit 2 ;;
 esac

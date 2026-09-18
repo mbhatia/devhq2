@@ -34,7 +34,7 @@ jobs:
           version: 0.15.2
 
       - name: Bootstrap Ghostty
-        run: ./Scripts/bootstrap-ghostty.sh
+        run: ./Scripts/bootstrap-ghostty.sh bootstrap
 
       - name: Set build metadata
         shell: bash
