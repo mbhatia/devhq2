@@ -25,11 +25,34 @@ if [ "$actual_commit" != "$required_commit" ]; then
   exit 1
 fi
 
+# Ghostty does not attach its resource install steps to a lib-vt-only build,
+# even when emit-terminfo is enabled. Wire those steps into the pinned build
+# without carrying a permanent modification in the submodule.
+build_file="$ghostty/build.zig"
+build_backup=$(mktemp)
+cp "$build_file" "$build_backup"
+restore_build_file() {
+  cp "$build_backup" "$build_file"
+  rm -f "$build_backup"
+}
+trap restore_build_file EXIT HUP INT TERM
+awk '
+  { print }
+  $0 == "    const resources = try buildpkg.GhosttyResources.init(b, &config, &deps);" {
+    print "    if (config.emit_terminfo) resources.install();"
+    patched = 1
+  }
+  END { if (!patched) exit 1 }
+' "$build_backup" > "$build_file"
+
 (cd "$ghostty" && zig build \
   --prefix "$ghostty/zig-out" \
   -Demit-lib-vt=true \
   -Demit-xcframework=true \
   -Demit-terminfo=true)
+
+restore_build_file
+trap - EXIT HUP INT TERM
 
 rm -rf "$root/ghostty-vt.xcframework"
 cp -R "$ghostty/zig-out/lib/ghostty-vt.xcframework" "$root/ghostty-vt.xcframework"
