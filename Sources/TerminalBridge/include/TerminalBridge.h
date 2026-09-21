@@ -27,6 +27,8 @@ typedef struct {
     uint16_t cursor_row;
     uint8_t cursor_visible;
     uint8_t cursor_style;
+    size_t scrollback_rows;
+    size_t scroll_offset;
 } DevHQTerminalSnapshot;
 
 enum {
@@ -48,8 +50,16 @@ DevHQTerminal *devhq_terminal_create(
     uint16_t rows,
     uint32_t pixel_width,
     uint32_t pixel_height);
+// Stop all readers before closing. Other calls may run concurrently with a
+// single reader; Ghostty state is internally serialized.
 void devhq_terminal_close(DevHQTerminal *terminal);
+// Positive: bytes parsed; zero: would block; negative: EOF or read error.
 ssize_t devhq_terminal_read(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);
+// Separate gathering from parsing so macOS's 1 KiB PTY reads can overlap VT work.
+ssize_t devhq_terminal_read_output(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);
+ssize_t devhq_terminal_gather_output(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);
+size_t devhq_terminal_available_output(DevHQTerminal *terminal);
+void devhq_terminal_feed(DevHQTerminal *terminal, const uint8_t *buffer, size_t count);
 ssize_t devhq_terminal_write(DevHQTerminal *terminal, const uint8_t *bytes, size_t count);
 bool devhq_terminal_resize(
     DevHQTerminal *terminal,
@@ -58,6 +68,7 @@ bool devhq_terminal_resize(
     uint32_t pixel_width,
     uint32_t pixel_height);
 pid_t devhq_terminal_pid(const DevHQTerminal *terminal);
+int devhq_terminal_fd(const DevHQTerminal *terminal);
 bool devhq_terminal_poll_exit(DevHQTerminal *terminal, int *status);
 bool devhq_terminal_uses_ghostty(void);
 bool devhq_terminal_snapshot(
@@ -65,6 +76,11 @@ bool devhq_terminal_snapshot(
     DevHQTerminalCell *cells,
     size_t capacity,
     DevHQTerminalSnapshot *snapshot);
+/// Copies a UTF-8 terminal property (title or current working directory).
+/// Pass `NULL, 0` to obtain the required byte count.
+size_t devhq_terminal_title(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);
+size_t devhq_terminal_working_directory(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);
+bool devhq_terminal_scroll(DevHQTerminal *terminal, intptr_t lines);
 size_t devhq_terminal_hyperlink_at(
     DevHQTerminal *terminal,
     uint16_t column,
