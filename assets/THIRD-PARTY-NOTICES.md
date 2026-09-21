@@ -30,3 +30,17 @@ Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors. Distributed
 under the terms in `Ghostty-LICENSE.txt`.
 
 Project: <https://ghostty.org/>
+
+## JetBrains Mono
+
+Copyright (c) 2020 The JetBrains Mono Project Authors. Bundled as the default
+terminal font under the SIL Open Font License 1.1; see `JetBrainsMono-OFL.txt`.
+
+Project: <https://www.jetbrains.com/lp/mono/>
+
+## Nerd Fonts Symbols Only
+
+Copyright (c) 2014 Ryan L McIntyre. Bundled as the terminal's Nerd Font symbol
+fallback under the MIT license; see `NerdFonts-LICENSE.txt`.
+
+Project: <https://www.nerdfonts.com/>

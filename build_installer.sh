@@ -96,6 +96,8 @@ need_cmd swift
 [ -f "$SCRIPT_DIR/assets/DevHQ.icns" ] || die "missing app icon: assets/DevHQ.icns"
 [ -f "$SCRIPT_DIR/assets/Lua-LICENSE.txt" ] || die "missing Lua license: assets/Lua-LICENSE.txt"
 [ -f "$SCRIPT_DIR/assets/THIRD-PARTY-NOTICES.md" ] || die "missing third-party notices"
+[ -f "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/JetBrainsMono-OFL.txt" ] || die "missing bundled JetBrains Mono license"
+[ -f "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/NerdFonts-LICENSE.txt" ] || die "missing bundled Nerd Fonts license"
 [ -f "$SCRIPT_DIR/LICENSE" ] || die "missing DevHQ license"
 [ -f "$SCRIPT_DIR/Vendor/ghostty/LICENSE" ] || die "missing Ghostty license; initialize the Ghostty submodule"
 [ -d "$SCRIPT_DIR/ghostty-vt.xcframework" ] || die "missing ghostty-vt.xcframework; run ./Scripts/bootstrap-ghostty.sh"
@@ -168,11 +170,15 @@ done < <(find "$BIN_DIR" -maxdepth 1 -type d -name '*.bundle' -print0)
 [ "$bundle_count" -gt 0 ] || die "no SwiftPM resource bundles were produced"
 [ -d "$RESOURCES_DIR/DevHQ_DevHQ.bundle" ] || die "DevHQ resource bundle was not staged in Contents/Resources"
 [ -d "$RESOURCES_DIR/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "CodeEditLanguages resource bundle was not staged in Contents/Resources"
+[ -f "$RESOURCES_DIR/DevHQ_DevHQ.bundle/Resources/Fonts/JetBrainsMono-Regular.ttf" ] || die "bundled terminal font was not staged"
+[ -f "$RESOURCES_DIR/DevHQ_DevHQ.bundle/Resources/Fonts/SymbolsNerdFont-Regular.ttf" ] || die "bundled Nerd Font symbols were not staged"
 
 ditto "$SCRIPT_DIR/LICENSE" "$LEGAL_DIR/DevHQ-LICENSE.txt"
 ditto "$SCRIPT_DIR/assets/Lua-LICENSE.txt" "$LEGAL_DIR/Lua-LICENSE.txt"
 ditto "$LUA_SWIFT_LICENSE" "$LEGAL_DIR/LuaSwift-LICENSE.txt"
 ditto "$SCRIPT_DIR/Vendor/ghostty/LICENSE" "$LEGAL_DIR/Ghostty-LICENSE.txt"
+ditto "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/JetBrainsMono-OFL.txt" "$LEGAL_DIR/JetBrainsMono-OFL.txt"
+ditto "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/NerdFonts-LICENSE.txt" "$LEGAL_DIR/NerdFonts-LICENSE.txt"
 ditto "$SCRIPT_DIR/assets/THIRD-PARTY-NOTICES.md" "$LEGAL_DIR/THIRD-PARTY-NOTICES.md"
 chmod 644 "$RESOURCES_DIR/DevHQ.icns" "$LEGAL_DIR"/*
 

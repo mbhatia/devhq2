@@ -28,6 +28,7 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     private var font: NSFont
     private var boldFont: NSFont
     private var italicFont: NSFont
+    private var boldItalicFont: NSFont
     private var fontName: String
     private(set) var cellWidth: CGFloat = 8
     private(set) var cellHeight: CGFloat = 17
@@ -42,9 +43,10 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         self.session = session
         snapshot = session.snapshot
         self.fontName = fontName
-        font = EditorFont.monospaced(named: fontName, size: 13, weight: .regular)
-        boldFont = EditorFont.monospaced(named: fontName, size: 13, weight: .bold)
-        italicFont = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        font = TerminalFont.regular(named: fontName, size: 13)
+        boldFont = TerminalFont.bold(named: fontName, size: 13)
+        italicFont = TerminalFont.italic(named: fontName, size: 13)
+        boldItalicFont = TerminalFont.boldItalic(named: fontName, size: 13)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
@@ -55,9 +57,10 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     func setFont(named name: String) {
         guard fontName != name else { return }
         fontName = name
-        font = EditorFont.monospaced(named: name, size: 13, weight: .regular)
-        boldFont = EditorFont.monospaced(named: name, size: 13, weight: .bold)
-        italicFont = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        font = TerminalFont.regular(named: name, size: 13)
+        boldFont = TerminalFont.bold(named: name, size: 13)
+        italicFont = TerminalFont.italic(named: name, size: 13)
+        boldItalicFont = TerminalFont.boldItalic(named: name, size: 13)
         updateFontMetrics()
         updateSize()
     }
@@ -140,8 +143,11 @@ final class NativeTerminalView: NSView, NSTextInputClient {
                     ? NSColor.selectedTextColor
                     : (cell.inverse ? cell.background?.nsColor : cell.foreground?.nsColor)
                         ?? NSColor(calibratedWhite: 0.88, alpha: 1)
+                let primaryFont = cell.bold && cell.italic
+                    ? boldItalicFont
+                    : (cell.bold ? boldFont : (cell.italic ? italicFont : font))
                 var attributes: [NSAttributedString.Key: Any] = [
-                    .font: cell.bold ? boldFont : (cell.italic ? italicFont : font),
+                    .font: TerminalFont.font(for: cell.text, primary: primaryFont),
                     .foregroundColor: foreground
                 ]
                 if cell.underline || cell.hyperlink != nil {
