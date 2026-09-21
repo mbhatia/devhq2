@@ -114,6 +114,7 @@ enum ReviewReplyCLI {
 @main
 enum DevHQMain {
     static func main() {
+        ValidationAppBundle.reexecIfRequested()
         let arguments = CommandLine.arguments
         if ReviewReplyCLI.isReviewInvocation(arguments) {
             exit(ReviewReplyCLI.run(arguments: arguments))
