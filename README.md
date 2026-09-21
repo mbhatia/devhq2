@@ -141,9 +141,12 @@ git submodule update --init
 ./Scripts/bootstrap-ghostty.sh test
 ```
 
-The bootstrap requires Zig 0.15.2, verifies Ghostty commit
-`41ab6c5ab650465dd65c9957ae0a95225e2c1048`, builds
+The bootstrap requires Zig 0.16.0, verifies Ghostty commit
+`3c47ca159368eb4a860ffe5333abdf4a85b2767b`, builds
 `ghostty-vt.xcframework`, and installs Ghostty's `xterm-ghostty` terminfo data.
+This revision includes upstream batched text/Unicode processing optimizations.
+Terminal history retains approximately 10,000 lines, bounded by Ghostty's native
+50 MB scrollback allocation limit (both limits are enforced at page granularity).
 Ghostty is licensed under the MIT license; its license is retained at
 `Vendor/ghostty/LICENSE`.
 

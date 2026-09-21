@@ -33,6 +33,15 @@ struct DevHQTerminal {
 #endif
 };
 
+#ifdef DEVHQ_USE_GHOSTTY
+static GhosttyResult terminal_mode_get(GhosttyTerminal terminal, GhosttyMode mode, bool *value) {
+    GhosttyTerminalModeConfig config = {.mode = mode, .value = false};
+    GhosttyResult result = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config);
+    if (result == GHOSTTY_SUCCESS) *value = config.value;
+    return result;
+}
+#endif
+
 static struct winsize make_winsize(
     uint16_t columns, uint16_t rows, uint32_t pixel_width, uint32_t pixel_height) {
     struct winsize value = {0};
@@ -61,15 +70,16 @@ DevHQTerminal *devhq_terminal_create(
     DevHQTerminal *terminal = calloc(1, sizeof(*terminal));
     if (!terminal) return NULL;
 #ifdef DEVHQ_USE_GHOSTTY
-    GhosttyTerminalOptions options = {
-        .cols = columns,
-        .rows = rows,
-        .max_scrollback = 10000,
-    };
-    if (ghostty_terminal_new(NULL, &terminal->ghostty, options) != GHOSTTY_SUCCESS) {
+    if (ghostty_terminal_new(NULL, &terminal->ghostty, columns, rows) != GHOSTTY_SUCCESS) {
         free(terminal);
         return NULL;
     }
+    size_t scrollback_bytes = 50000000;
+    size_t scrollback_lines = 10000;
+    (void)ghostty_terminal_set(terminal->ghostty,
+        GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_bytes);
+    (void)ghostty_terminal_set(terminal->ghostty,
+        GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines);
     if (ghostty_render_state_new(NULL, &terminal->render_state) != GHOSTTY_SUCCESS) {
         ghostty_terminal_free(terminal->ghostty);
         free(terminal);
@@ -302,7 +312,7 @@ bool devhq_terminal_paste(DevHQTerminal *terminal, const char *text, size_t coun
 #else
     if (!terminal || !text) return false;
     bool bracketed = false;
-    (void)ghostty_terminal_mode_get(terminal->ghostty, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed);
+    (void)terminal_mode_get(terminal->ghostty, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed);
     char *input = malloc(count);
     if (!input) return false;
     memcpy(input, text, count);
@@ -332,7 +342,7 @@ bool devhq_terminal_focus(DevHQTerminal *terminal, bool focused) {
 #else
     if (!terminal) return false;
     bool reporting = false;
-    if (ghostty_terminal_mode_get(
+    if (terminal_mode_get(
             terminal->ghostty, GHOSTTY_MODE_FOCUS_EVENT, &reporting) != GHOSTTY_SUCCESS ||
         !reporting) return true;
     char output[8];
@@ -384,7 +394,7 @@ bool devhq_terminal_snapshot(
 #else
     if (!terminal || !cells || !snapshot) return false;
     bool synchronized = false;
-    if (ghostty_terminal_mode_get(
+    if (terminal_mode_get(
             terminal->ghostty, GHOSTTY_MODE_SYNC_OUTPUT, &synchronized) != GHOSTTY_SUCCESS) {
         return false;
     }
