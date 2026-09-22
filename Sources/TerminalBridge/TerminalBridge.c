@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -338,6 +339,21 @@ bool devhq_terminal_resize(
 
 pid_t devhq_terminal_pid(const DevHQTerminal *terminal) {
     return terminal ? terminal->pid : -1;
+}
+
+size_t devhq_terminal_process_working_directory(
+    const DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
+    if (!terminal || terminal->pid <= 0) return 0;
+    struct proc_vnodepathinfo info = {0};
+    int result = proc_pidinfo(
+        terminal->pid, PROC_PIDVNODEPATHINFO, 0, &info, sizeof(info));
+    if (result != sizeof(info) || info.pvi_cdir.vip_path[0] == '\0') return 0;
+    size_t length = strlen(info.pvi_cdir.vip_path);
+    if (buffer && capacity > 0) {
+        size_t count = length < capacity ? length : capacity;
+        memcpy(buffer, info.pvi_cdir.vip_path, count);
+    }
+    return length;
 }
 
 int devhq_terminal_fd(const DevHQTerminal *terminal) { return terminal ? terminal->fd : -1; }

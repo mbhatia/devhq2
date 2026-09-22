@@ -407,7 +407,18 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// links (URLs, file URLs, and paths with optional line:column) in the
     /// clicked row's visible text.
     func openLink(at point: (column: Int, row: Int)) -> Bool {
-        if openHyperlink(at: point) { return true }
+        if let url = hyperlink(at: point) {
+            let kind: TerminalLinkKind = url.isFileURL ? .fileURL : .url
+            let match = TerminalLinkMatch(
+                kind: kind,
+                target: url.absoluteString,
+                raw: url.absoluteString
+            )
+            if let handler = Self.detectedLinkHandler,
+               handler(match, linkCurrentDirectory, rootURL) { return true }
+            hostServices.open(url: url)
+            return true
+        }
         guard let handler = Self.detectedLinkHandler,
               snapshot.cells.indices.contains(point.row),
               let line = TerminalLinkDetector.line(
@@ -418,7 +429,21 @@ final class TerminalSession: ObservableObject, Identifiable {
                   in: line.text,
                   utf16Index: line.utf16Index
               ) else { return false }
-        return handler(match, currentDirectory, rootURL)
+        return handler(match, linkCurrentDirectory, rootURL)
+    }
+
+    /// The shell's process directory reflects ordinary `cd` commands even
+    /// when the shell does not emit OSC 7. OSC 7 remains the fallback when
+    /// the process has exited or macOS declines the inspection.
+    private var linkCurrentDirectory: URL {
+        guard let path = nativeString(devhq_terminal_process_working_directory),
+              !path.isEmpty else { return currentDirectory }
+        let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return currentDirectory }
+        if url != currentDirectory { currentDirectory = url }
+        return url
     }
 
     func close() {

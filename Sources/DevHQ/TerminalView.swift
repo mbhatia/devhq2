@@ -307,7 +307,7 @@ final class NativeTerminalView: NSView, NSTextInputClient {
 
     @objc private func openContextMenuLink() {
         guard let contextMenuLinkPoint else { return }
-        _ = session.openHyperlink(at: contextMenuLinkPoint)
+        _ = session.openLink(at: contextMenuLinkPoint)
     }
 
     private func gridPoint(for point: NSPoint) -> (column: Int, row: Int) {

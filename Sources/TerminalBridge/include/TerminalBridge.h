@@ -71,6 +71,10 @@ bool devhq_terminal_resize(
     uint32_t pixel_width,
     uint32_t pixel_height);
 pid_t devhq_terminal_pid(const DevHQTerminal *terminal);
+/// Copies the shell process's current working directory into `buffer`.
+/// Pass `NULL, 0` to obtain the required byte count, including no terminator.
+size_t devhq_terminal_process_working_directory(
+    const DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);
 int devhq_terminal_fd(const DevHQTerminal *terminal);
 bool devhq_terminal_poll_exit(DevHQTerminal *terminal, int *status);
 bool devhq_terminal_uses_ghostty(void);

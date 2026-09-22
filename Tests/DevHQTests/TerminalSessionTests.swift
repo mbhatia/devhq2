@@ -192,6 +192,23 @@ final class TerminalSessionTests: XCTestCase {
         }
         XCTAssertTrue(opened)
         XCTAssertEqual(host.openedURLs, [URL(string: "https://example.com")!])
+
+        var routed: TerminalLinkMatch?
+        TerminalSession.detectedLinkHandler = { match, _, _ in
+            routed = match
+            return true
+        }
+        defer { TerminalSession.detectedLinkHandler = nil }
+        var routedLink = false
+        for row in 0..<session.snapshot.rows where !routedLink {
+            for column in 0..<session.snapshot.columns where !routedLink {
+                routedLink = session.openLink(at: (column, row))
+            }
+        }
+        XCTAssertTrue(routedLink)
+        XCTAssertEqual(routed?.kind, .url)
+        XCTAssertTrue(routed?.target.hasPrefix("https://example.com") ?? false)
+        XCTAssertEqual(host.openedURLs, [URL(string: "https://example.com")!])
     }
 
     @MainActor
