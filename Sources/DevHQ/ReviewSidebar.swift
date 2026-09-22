@@ -13,7 +13,7 @@ struct ReviewSidebarPane: View {
                 Image(systemName: "text.bubble")
                     .foregroundStyle(.secondary)
                 Text("Review")
-                    .font(.headline)
+                    .font(.devHQ(.headline, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
                 Button {
@@ -35,7 +35,7 @@ struct ReviewSidebarPane: View {
                     Image(systemName: "text.bubble")
                         .font(.system(size: 34))
                         .foregroundStyle(.secondary)
-                    Text("No Comments").font(.title3.weight(.semibold))
+                    Text("No Comments").font(.devHQ(.title3, weight: .semibold))
                     Text("Select text and run devhq: add comment to start a review thread.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -77,12 +77,12 @@ private struct ReviewSidebarRow: View {
                     .fill(thread.state == .resolved ? Color.gray : Color.orange)
                     .frame(width: 7, height: 7)
                 Text(header)
-                    .font(.callout.weight(.semibold))
+                    .font(.devHQ(.callout, weight: .semibold))
                     .lineLimit(1)
             }
             if !preview.isEmpty {
                 Text(preview)
-                    .font(.caption)
+                    .font(.devHQ(.caption1))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 13)

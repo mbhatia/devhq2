@@ -21,8 +21,8 @@ local devhq = require "devhq"
 devhq.window.theme = "light" -- "system", "light", or "dark"
 devhq.treeview.size = 300
 devhq.fonts.ui = "Avenir Next"
-devhq.fonts.code = "JetBrainsMono Nerd Font Mono"
-devhq.fonts.terminal = "JetBrainsMono Nerd Font Mono"
+devhq.fonts.code = "MartianMonoNFM"
+devhq.fonts.terminal = "MartianMonoNFM"
 ```
 
 The `devhq` module follows the same broad separation used by Lite XL:

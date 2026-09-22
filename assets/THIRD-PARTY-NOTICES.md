@@ -31,16 +31,15 @@ under the terms in `Ghostty-LICENSE.txt`.
 
 Project: <https://ghostty.org/>
 
-## JetBrains Mono
+## Martian Mono Nerd Font Mono
 
-Copyright (c) 2020 The JetBrains Mono Project Authors. Bundled as the default
-terminal font under the SIL Open Font License 1.1; see `JetBrainsMono-OFL.txt`.
+Copyright 2021 The Martian Mono Project Authors. DevHQ bundles the
+standard-width monospaced Regular, Medium, and Bold faces from Nerd Fonts
+v3.5.1 under the SIL Open Font License 1.1; see `MartianMono-LICENSE.txt`.
 
-Project: <https://www.jetbrains.com/lp/mono/>
+Source archive: <https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/MartianMono.zip>
 
-## Nerd Fonts Symbols Only
+Archive SHA-256: `bf873eaa04794d003961bfc0a1629d93207a5cb7abb5d7486e28ed6f316c5afe`
 
-Copyright (c) 2014 Ryan L McIntyre. Bundled as the terminal's Nerd Font symbol
-fallback under the MIT license; see `NerdFonts-LICENSE.txt`.
-
-Project: <https://www.nerdfonts.com/>
+Projects: <https://github.com/evilmartians/mono>,
+<https://github.com/ryanoasis/nerd-fonts>

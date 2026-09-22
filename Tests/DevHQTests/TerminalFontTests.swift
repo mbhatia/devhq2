@@ -40,7 +40,7 @@ final class TerminalFontTests: XCTestCase {
 
         XCTAssertNil(
             DevHQResourceBundle.url(
-                forResource: "JetBrainsMono-Regular",
+                forResource: "MartianMonoNerdFontMono-Regular",
                 withExtension: "ttf",
                 subdirectory: "Fonts",
                 packagedResourceURL: temporaryDirectory
@@ -51,7 +51,7 @@ final class TerminalFontTests: XCTestCase {
     func testMissingPackagedBundleDoesNotUseSwiftPMFallbackInApp() {
         XCTAssertNil(
             DevHQResourceBundle.url(
-                forResource: "JetBrainsMono-Regular",
+                forResource: "MartianMonoNerdFontMono-Regular",
                 withExtension: "ttf",
                 subdirectory: "Fonts",
                 packagedResourceURL: nil,
@@ -87,27 +87,21 @@ final class TerminalFontTests: XCTestCase {
         XCTAssertEqual(errors, ["devhq: bundled terminal fonts could not be resolved from the app resources"])
     }
 
-    func testDefaultTerminalFontIsBundledJetBrainsMono() {
-        XCTAssertEqual(TerminalFont.regular(named: "", size: 13).fontName, "JetBrainsMono-Regular")
-        XCTAssertEqual(TerminalFont.bold(named: "", size: 13).fontName, "JetBrainsMono-Bold")
-        XCTAssertEqual(TerminalFont.italic(named: "", size: 13).fontName, "JetBrainsMono-Italic")
-        XCTAssertEqual(TerminalFont.boldItalic(named: "", size: 13).fontName, "JetBrainsMono-BoldItalic")
+    func testDefaultTerminalFontIsBundledMartianMono() {
+        XCTAssertEqual(TerminalFont.regular(named: "", size: 13).fontName, "MartianMonoNFM")
+        XCTAssertEqual(TerminalFont.bold(named: "", size: 13).fontName, "MartianMonoNFM-Bold")
+        XCTAssertEqual(TerminalFont.italic(named: "", size: 13).fontName, "MartianMonoNFM")
+        XCTAssertEqual(TerminalFont.boldItalic(named: "", size: 13).fontName, "MartianMonoNFM-Bold")
+        XCTAssertNotEqual(CTFontGetMatrix(TerminalFont.italic(named: "", size: 13) as CTFont).c, 0)
     }
 
     func testRegisteredFontsComeFromThePackagedResourceBundle() throws {
         let resourceBundle = Bundle.module
         let fontURLs = try XCTUnwrap(TerminalFont.verifiedBundledFontURLs(in: resourceBundle))
-        XCTAssertEqual(fontURLs.count, 5)
+        XCTAssertEqual(fontURLs.count, 3)
         for url in fontURLs {
             XCTAssertTrue(url.path.contains("DevHQ_DevHQ.bundle/Resources/Fonts/"))
         }
     }
-
-    func testBundledNerdFontSupportsPowerlevel10kAndSupplementaryPlaneSymbols() throws {
-        let symbols = try XCTUnwrap(TerminalFont.nerdSymbolsFont(size: 13))
-        XCTAssertTrue(TerminalFont.supports("\u{E0B0}", in: symbols))
-        XCTAssertTrue(TerminalFont.supports("\u{F0001}", in: symbols))
-    }
-
 
 }

@@ -1,12 +1,18 @@
-# Bundled terminal fonts
+# Bundled terminal font
 
-These assets were originally copied from the Ghostty dependencies at
-`Vendor/ghostty` commit `41ab6c5ab650465dd65c9957ae0a95225e2c1048`.
-The adopted revision `3c47ca159368eb4a860ffe5333abdf4a85b2767b` pins the
-same font archives and dependency hashes. All five bundled font files remain
-byte-identical to those dependencies; no font assets changed with the engine upgrade.
+DevHQ bundles the standard-width, monospaced Martian Mono Nerd Font faces from
+Nerd Fonts v3.5.1:
 
-- `JetBrainsMono-*.ttf`: JetBrains Mono 2.304, Ghostty's default terminal
-  family. See `JetBrainsMono-OFL.txt`.
-- `SymbolsNerdFont-Regular.ttf`: Nerd Fonts Symbols Only 3.4.0, Ghostty's
-  Nerd Font fallback. See `NerdFonts-LICENSE.txt`.
+- `MartianMonoNerdFontMono-Regular.ttf`
+- `MartianMonoNerdFontMono-Medium.ttf`
+- `MartianMonoNerdFontMono-Bold.ttf`
+
+The archive contains no italic faces; the application synthesizes oblique
+styles when needed. The included license is `MartianMono-LICENSE.txt` (SIL Open
+Font License 1.1).
+
+Provenance:
+
+- Source: <https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/MartianMono.zip>
+- Archive version: Nerd Fonts v3.5.1 (Martian Mono 1.1.0)
+- SHA-256: `bf873eaa04794d003961bfc0a1629d93207a5cb7abb5d7486e28ed6f316c5afe`

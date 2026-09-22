@@ -35,6 +35,7 @@ final class TerminalTextRenderer {
     private struct FontKey: Hashable {
         let name: String
         let size: Int
+        let transform: [Int]
     }
 
     private struct CellKey: Hashable {
@@ -69,7 +70,6 @@ final class TerminalTextRenderer {
     private var cache: [RowKey: RowLayout] = [:]
     private var recency: [RowKey] = []
     private var cachedUTF16 = 0
-    private var cascadingFonts: [FontKey: CTFont] = [:]
     private var hits = 0
     private var misses = 0
 
@@ -81,7 +81,6 @@ final class TerminalTextRenderer {
     func invalidate() {
         cache.removeAll(keepingCapacity: true)
         recency.removeAll(keepingCapacity: true)
-        cascadingFonts.removeAll(keepingCapacity: true)
         cachedUTF16 = 0
     }
 
@@ -191,7 +190,7 @@ final class TerminalTextRenderer {
             // across terminal columns.
             guard cell.width != 0 || !cell.text.isEmpty else { continue }
             let text = cell.text.isEmpty ? " " : cell.text
-            let font = cascadingFont(fonts.font(for: cell))
+            let font = fonts.font(for: cell) as CTFont
             let start = attributed.length
             columnSourceStarts[column] = CFIndex(start)
             attributed.append(NSAttributedString(string: text, attributes: [
@@ -265,24 +264,13 @@ final class TerminalTextRenderer {
     }
 
     private func fontKey(_ font: NSFont) -> FontKey {
-        FontKey(name: font.fontName, size: Int((font.pointSize * 1024).rounded()))
-    }
-
-    private func cascadingFont(_ font: NSFont) -> CTFont {
-        let key = fontKey(font)
-        if let cached = cascadingFonts[key] { return cached }
-        guard let symbols = TerminalFont.nerdSymbolsFont(size: font.pointSize) else {
-            cascadingFonts[key] = font as CTFont
-            return font as CTFont
-        }
-        let symbolsDescriptor = CTFontCopyFontDescriptor(symbols as CTFont)
-        let attributes: [CFString: Any] = [kCTFontCascadeListAttribute: [symbolsDescriptor]]
-        let descriptor = CTFontDescriptorCreateCopyWithAttributes(
-            CTFontCopyFontDescriptor(font as CTFont), attributes as CFDictionary
+        let matrix = CTFontGetMatrix(font as CTFont)
+        return FontKey(
+            name: font.fontName,
+            size: Int((font.pointSize * 1024).rounded()),
+            transform: [matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty]
+                .map { Int(($0 * 1_000_000).rounded()) }
         )
-        let cascaded = CTFontCreateWithFontDescriptor(descriptor, font.pointSize, nil)
-        cascadingFonts[key] = cascaded
-        return cascaded
     }
 
     private func insert(_ layout: RowLayout, for key: RowKey) {

@@ -162,7 +162,7 @@ private struct CommandPaletteCard: View {
                     .focused($searchIsFocused)
                     .accessibilityIdentifier("command-palette-search")
             }
-            .font(.system(size: 16))
+            .font(.devHQ(size: 16))
             .padding(.horizontal, 14)
             .frame(height: 48)
 
@@ -220,7 +220,7 @@ private struct CommandPaletteCard: View {
                 if let errorMessage = controller.errorMessage {
                     Divider()
                     Text(errorMessage)
-                        .font(.caption)
+                        .font(.devHQ(.caption1))
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)

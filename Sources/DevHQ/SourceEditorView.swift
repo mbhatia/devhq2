@@ -88,7 +88,7 @@ struct SourceEditorView: View {
             if diffConfiguration?.isEnabled == true,
                let message = diffPresentation.statusMessage {
                 Text(message)
-                    .font(.caption)
+                    .font(.devHQ(.caption1))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)

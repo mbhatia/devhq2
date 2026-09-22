@@ -12,8 +12,8 @@ final class LuaCommandTests: XCTestCase {
             """
             local devhq = require "devhq"
             devhq.fonts.ui = "Avenir Next"
-            devhq.fonts.code = "JetBrainsMono Nerd Font Mono"
-            devhq.fonts.terminal = "JetBrainsMono Nerd Font Mono"
+            devhq.fonts.code = "MartianMonoNFM"
+            devhq.fonts.terminal = "MartianMonoNFM"
             """,
             in: directory
         )
@@ -24,8 +24,8 @@ final class LuaCommandTests: XCTestCase {
 
         XCTAssertNil(settings.pluginError)
         XCTAssertEqual(settings.uiFontName, "Avenir Next")
-        XCTAssertEqual(settings.codeFontName, "JetBrainsMono Nerd Font Mono")
-        XCTAssertEqual(settings.terminalFontName, "JetBrainsMono Nerd Font Mono")
+        XCTAssertEqual(settings.codeFontName, "MartianMonoNFM")
+        XCTAssertEqual(settings.terminalFontName, "MartianMonoNFM")
     }
 
     @MainActor

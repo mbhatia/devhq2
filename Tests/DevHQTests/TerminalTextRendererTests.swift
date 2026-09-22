@@ -76,6 +76,23 @@ final class TerminalTextRendererTests: XCTestCase {
         XCTAssertEqual(renderer.cacheStatistics.layouts, 2)
     }
 
+    func testSyntheticItalicCreatesDistinctCachedLayout() throws {
+        let bitmap = try makeBitmap(width: 48, height: 32)
+        let renderer = TerminalTextRenderer()
+        let row = [TerminalCell(text: "A")]
+        let regular = TerminalFont.regular(named: "", size: 18)
+        let italic = TerminalFont.italic(named: "", size: 18)
+
+        renderer.draw(row: row, fonts: .init(regular: regular, bold: regular, italic: regular, boldItalic: regular),
+                      cellWidth: cellWidth, baseline: baseline, rowOrigin: .zero, context: bitmap.context,
+                      foreground: { _, _ in .white })
+        renderer.draw(row: row, fonts: .init(regular: italic, bold: italic, italic: italic, boldItalic: italic),
+                      cellWidth: cellWidth, baseline: baseline, rowOrigin: .zero, context: bitmap.context,
+                      foreground: { _, _ in .white })
+
+        XCTAssertEqual(renderer.cacheStatistics.layouts, 2)
+    }
+
     func testForegroundAndSelectionStyleChangesReuseCachedLayout() throws {
         let bitmap = try makeBitmap(width: 48, height: 32)
         let renderer = TerminalTextRenderer()
