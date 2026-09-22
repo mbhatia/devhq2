@@ -478,6 +478,9 @@ bool devhq_terminal_snapshot(
     return false;
 #else
     if (!terminal || !cells || !snapshot) return false;
+    // The caller supplies a fresh, zero-initialized snapshot. Initialize it
+    // before acquiring Ghostty state so every failure leaves no owned memory.
+    memset(snapshot, 0, sizeof(*snapshot));
     LOCK_TERMINAL(terminal);
     bool synchronized = false;
     if (terminal_mode_get(
@@ -496,7 +499,6 @@ bool devhq_terminal_snapshot(
             terminal->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows) != GHOSTTY_SUCCESS ||
         capacity < (size_t)columns * rows) { return false; }
     memset(cells, 0, sizeof(*cells) * (size_t)columns * rows);
-    memset(snapshot, 0, sizeof(*snapshot));
     snapshot->columns = columns;
     snapshot->rows = rows;
     (void)ghostty_render_state_get(terminal->render_state,
@@ -530,6 +532,7 @@ bool devhq_terminal_snapshot(
         ghostty_render_state_row_cells_new(NULL, &row_cells) != GHOSTTY_SUCCESS) goto fail;
     if (ghostty_render_state_get(terminal->render_state,
             GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &iterator) != GHOSTTY_SUCCESS) goto fail;
+    size_t grapheme_capacity = 0;
     size_t y = 0;
     while (y < rows && ghostty_render_state_row_iterator_next(iterator)) {
         if (ghostty_render_state_row_get(iterator,
@@ -540,16 +543,29 @@ bool devhq_terminal_snapshot(
             uint32_t length = 0;
             (void)ghostty_render_state_row_cells_get(row_cells,
                 GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &length);
+            if (snapshot->grapheme_count > UINT32_MAX ||
+                length > UINT32_MAX - snapshot->grapheme_count) goto fail;
+            output->grapheme_offset = (uint32_t)snapshot->grapheme_count;
+            output->grapheme_length = length;
             if (length > 0) {
-                uint32_t copied = length > 8 ? 8 : length;
-                uint32_t stack_codepoints[8] = {0};
-                uint32_t *codepoints = length > 8 ? calloc(length, sizeof(uint32_t)) : stack_codepoints;
-                if (!codepoints) goto fail;
-                (void)ghostty_render_state_row_cells_get(row_cells,
-                    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, codepoints);
-                memcpy(&output->codepoint0, codepoints, copied * sizeof(uint32_t));
-                output->codepoint_count = (uint8_t)copied;
-                if (codepoints != stack_codepoints) free(codepoints);
+                size_t needed = snapshot->grapheme_count + length;
+                if (needed > grapheme_capacity) {
+                    size_t capacity = grapheme_capacity ? grapheme_capacity : 256;
+                    while (capacity < needed) {
+                        if (capacity > SIZE_MAX / 2) { capacity = needed; break; }
+                        capacity *= 2;
+                    }
+                    if (capacity > SIZE_MAX / sizeof(*snapshot->graphemes)) goto fail;
+                    uint32_t *graphemes = realloc(
+                        snapshot->graphemes, capacity * sizeof(*snapshot->graphemes));
+                    if (!graphemes) goto fail;
+                    snapshot->graphemes = graphemes;
+                    grapheme_capacity = capacity;
+                }
+                if (ghostty_render_state_row_cells_get(row_cells,
+                        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+                        snapshot->graphemes + snapshot->grapheme_count) != GHOSTTY_SUCCESS) goto fail;
+                snapshot->grapheme_count = needed;
             }
             GhosttyCell raw = 0;
             GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
@@ -595,8 +611,15 @@ bool devhq_terminal_snapshot(
 fail:
     ghostty_render_state_row_cells_free(row_cells);
     ghostty_render_state_row_iterator_free(iterator);
+    devhq_terminal_snapshot_free(snapshot);
     return false;
 #endif
+}
+
+void devhq_terminal_snapshot_free(DevHQTerminalSnapshot *snapshot) {
+    if (!snapshot) return;
+    free(snapshot->graphemes);
+    memset(snapshot, 0, sizeof(*snapshot));
 }
 
 #ifdef DEVHQ_USE_GHOSTTY

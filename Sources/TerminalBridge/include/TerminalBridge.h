@@ -9,9 +9,8 @@
 typedef struct DevHQTerminal DevHQTerminal;
 
 typedef struct {
-    uint32_t codepoint0, codepoint1, codepoint2, codepoint3;
-    uint32_t codepoint4, codepoint5, codepoint6, codepoint7;
-    uint8_t codepoint_count;
+    uint32_t grapheme_offset;
+    uint32_t grapheme_length;
     uint8_t width;
     uint8_t flags;
     uint8_t has_foreground;
@@ -29,6 +28,10 @@ typedef struct {
     uint8_t cursor_style;
     size_t scrollback_rows;
     size_t scroll_offset;
+    // Owned by this snapshot. Each cell refers to a contiguous range in this
+    // buffer with its grapheme_offset and grapheme_length fields.
+    uint32_t *graphemes;
+    size_t grapheme_count;
 } DevHQTerminalSnapshot;
 
 enum {
@@ -76,6 +79,9 @@ bool devhq_terminal_snapshot(
     DevHQTerminalCell *cells,
     size_t capacity,
     DevHQTerminalSnapshot *snapshot);
+/// Releases the scalar buffer owned by a successful snapshot. The snapshot
+/// must be zero-initialized before use and freed once it is no longer needed.
+void devhq_terminal_snapshot_free(DevHQTerminalSnapshot *snapshot);
 /// Copies a UTF-8 terminal property (title or current working directory).
 /// Pass `NULL, 0` to obtain the required byte count.
 size_t devhq_terminal_title(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity);

@@ -593,6 +593,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         let success = nativeCells.withUnsafeMutableBufferPointer {
             devhq_terminal_snapshot(nativeHandle, $0.baseAddress, $0.count, &nativeSnapshot)
         }
+        defer { devhq_terminal_snapshot_free(&nativeSnapshot) }
         guard success,
               nativeSnapshot.columns > 0,
               nativeSnapshot.rows > 0 else { return nil }
@@ -601,7 +602,11 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard nativeCells.count >= columns * rows else { return nil }
         let cells = (0..<rows).map { row in
             (0..<columns).map { column in
-                Self.cell(from: nativeCells[row * columns + column])
+                Self.cell(
+                    from: nativeCells[row * columns + column],
+                    graphemes: nativeSnapshot.graphemes,
+                    graphemeCount: Int(nativeSnapshot.grapheme_count)
+                )
             }
         }
         let cursorStyle: TerminalCursorStyle = switch nativeSnapshot.cursor_style {
@@ -634,12 +639,23 @@ final class TerminalSession: ObservableObject, Identifiable {
         return String(bytes: bytes, encoding: .utf8)
     }
 
-    private static func cell(from native: DevHQTerminalCell) -> TerminalCell {
-        let codepoints = [
-            native.codepoint0, native.codepoint1, native.codepoint2, native.codepoint3,
-            native.codepoint4, native.codepoint5, native.codepoint6, native.codepoint7
-        ]
-        let scalars = codepoints.prefix(Int(native.codepoint_count)).compactMap(UnicodeScalar.init)
+    private static func cell(
+        from native: DevHQTerminalCell,
+        graphemes: UnsafeMutablePointer<UInt32>?,
+        graphemeCount: Int
+    ) -> TerminalCell {
+        let offset = Int(native.grapheme_offset)
+        let length = Int(native.grapheme_length)
+        let scalars: [UnicodeScalar]
+        if length > 0,
+           offset <= graphemeCount,
+           length <= graphemeCount - offset,
+           let graphemes {
+            scalars = UnsafeBufferPointer(start: graphemes + offset, count: length)
+                .compactMap(UnicodeScalar.init)
+        } else {
+            scalars = []
+        }
         let text = scalars.isEmpty ? " " : String(String.UnicodeScalarView(scalars))
         return TerminalCell(
             text: text,
