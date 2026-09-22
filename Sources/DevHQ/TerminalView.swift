@@ -119,6 +119,28 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         NSColor(calibratedWhite: 0.08, alpha: 1).setFill()
         dirtyRect.fill()
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // Paint every cell background first. A constrained icon may use the
+        // following blank cell, whose background must not cover its ink.
+        for row in snapshot.cells.indices {
+            let y = CGFloat(row) * cellHeight
+            if y > dirtyRect.maxY || y + cellHeight < dirtyRect.minY { continue }
+            for column in snapshot.cells[row].indices {
+                let cell = snapshot.cells[row][column]
+                let rect = CGRect(
+                    x: CGFloat(column) * cellWidth,
+                    y: y,
+                    width: cellWidth * CGFloat(max(1, cell.width)),
+                    height: cellHeight
+                )
+                let background = isSelected(column: column, row: row)
+                    ? NSColor.selectedTextBackgroundColor
+                    : (cell.inverse ? cell.foreground?.nsColor : cell.background?.nsColor)
+                if let background {
+                    background.setFill()
+                    context.fill(rect)
+                }
+            }
+        }
         for row in snapshot.cells.indices {
             let y = CGFloat(row) * cellHeight
             if y > dirtyRect.maxY || y + cellHeight < dirtyRect.minY { continue }
@@ -131,13 +153,6 @@ final class NativeTerminalView: NSView, NSTextInputClient {
                     height: cellHeight
                 )
                 let selected = isSelected(column: column, row: row)
-                let background = selected
-                    ? NSColor.selectedTextBackgroundColor
-                    : (cell.inverse ? cell.foreground?.nsColor : cell.background?.nsColor)
-                if let background {
-                    background.setFill()
-                    context.fill(rect)
-                }
                 guard !cell.text.isEmpty, cell.text != " " else { continue }
                 let foreground = selected
                     ? NSColor.selectedTextColor
@@ -146,8 +161,9 @@ final class NativeTerminalView: NSView, NSTextInputClient {
                 let primaryFont = cell.bold && cell.italic
                     ? boldItalicFont
                     : (cell.bold ? boldFont : (cell.italic ? italicFont : font))
+                let selectedFont = TerminalFont.font(for: cell.text, primary: primaryFont)
                 var attributes: [NSAttributedString.Key: Any] = [
-                    .font: TerminalFont.font(for: cell.text, primary: primaryFont),
+                    .font: selectedFont,
                     .foregroundColor: foreground
                 ]
                 if cell.underline || cell.hyperlink != nil {
@@ -156,12 +172,77 @@ final class NativeTerminalView: NSView, NSTextInputClient {
                 if cell.strikethrough {
                     attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
                 }
-                NSAttributedString(string: cell.text, attributes: attributes).draw(
-                    at: CGPoint(x: rect.minX, y: y + baseline - font.ascender)
-                )
+                let string = NSAttributedString(string: cell.text, attributes: attributes)
+                if TerminalGlyphLayout.isConstrainedNerdIcon(cell.text),
+                   let layout = constrainedIconLayout(
+                    for: cell.text,
+                    font: selectedFont,
+                    primaryFont: primaryFont,
+                    cellRect: rect,
+                    availableCells: availableIconCells(in: snapshot.cells[row], at: column)
+                   ) {
+                    context.saveGState()
+                    context.translateBy(x: layout.origin.x, y: layout.origin.y)
+                    context.scaleBy(x: layout.scale, y: layout.scale)
+                    string.draw(at: .zero)
+                    context.restoreGState()
+                } else {
+                    // Fallback symbol fonts have different ascenders. Align
+                    // their baseline to the terminal's primary font rather
+                    // than using the primary ascender as their text origin.
+                    string.draw(at: CGPoint(x: rect.minX, y: y + baseline - selectedFont.ascender))
+                }
             }
         }
         drawCursor(context)
+    }
+
+    private func availableIconCells(in row: [TerminalCell], at column: Int) -> Int {
+        guard column + 1 < row.count,
+              row[column + 1].text.isEmpty || row[column + 1].text == " ",
+              (column == 0 || !TerminalGlyphLayout.isConstrainedNerdIcon(row[column - 1].text)) else {
+            return 1
+        }
+        return 2
+    }
+
+    private func constrainedIconLayout(
+        for text: String,
+        font: NSFont,
+        primaryFont: NSFont,
+        cellRect: CGRect,
+        availableCells: Int
+    ) -> TerminalGlyphLayout.Layout? {
+        var characters = Array(text.utf16)
+        var glyphs = Array(repeating: CGGlyph(), count: characters.count)
+        guard CTFontGetGlyphsForCharacters(font as CTFont, &characters, &glyphs, characters.count) else {
+            return nil
+        }
+        var bounds = CTFontGetBoundingRectsForGlyphs(font as CTFont, .default, &glyphs, nil, glyphs.count)
+        guard !bounds.isNull else { return nil }
+        // `draw(at:)` takes a line-top origin, while Core Text reports glyph
+        // bounds from the baseline with an upward Y axis.
+        bounds.origin.y = font.ascender - bounds.maxY
+        let primaryFaceHeight = primaryFont.ascender - primaryFont.descender + primaryFont.leading
+        let capHeight = CTFontGetCapHeight(primaryFont as CTFont)
+        let singleIconHeight = (2 * capHeight + primaryFaceHeight) / 3
+        var primaryGlyph = CTFontGetGlyphWithName(primaryFont as CTFont, "M" as CFString)
+        var faceWidth = CGSize.zero
+        CTFontGetAdvancesForGlyphs(primaryFont as CTFont, .horizontal, &primaryGlyph, &faceWidth, 1)
+        return TerminalGlyphLayout.layout(
+            glyphBounds: bounds,
+            cellRect: cellRect,
+            faceRect: CGRect(
+                x: cellRect.minX,
+                y: cellRect.minY + baseline - primaryFont.ascender,
+                width: cellRect.width,
+                height: primaryFaceHeight
+            ),
+            faceWidth: faceWidth.width,
+            availableCells: availableCells,
+            singleIconHeight: singleIconHeight,
+            iconHeight: primaryFaceHeight
+        )
     }
 
     private func drawCursor(_ context: CGContext) {
