@@ -46,16 +46,6 @@ enum TerminalFont {
         return bundled("JetBrainsMono-BoldItalic", size: size, fallback: .bold)
     }
 
-    static func font(for text: String, primary: NSFont) -> NSFont {
-        guard containsNerdSymbol(in: text),
-              !supports(text, in: primary),
-              let symbols = nerdSymbolsFont(size: primary.pointSize),
-              supports(text, in: symbols) else {
-            return primary
-        }
-        return symbols
-    }
-
     static func nerdSymbolsFont(size: CGFloat) -> NSFont? {
         _ = registerBundledFonts
         return NSFont(name: nerdSymbolsPostscriptName, size: size)
@@ -104,12 +94,6 @@ enum TerminalFont {
         _ = registerBundledFonts
         return NSFont(name: postscriptName, size: size)
             ?? NSFont.monospacedSystemFont(ofSize: size, weight: weight)
-    }
-
-    private static func containsNerdSymbol(in text: String) -> Bool {
-        text.unicodeScalars.contains {
-            (0xE000...0xF8FF).contains($0.value) || (0xF0001...0xF1AF0).contains($0.value)
-        }
     }
 
     private static let registerBundledFonts: Void = {

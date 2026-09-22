@@ -109,9 +109,5 @@ final class TerminalFontTests: XCTestCase {
         XCTAssertTrue(TerminalFont.supports("\u{F0001}", in: symbols))
     }
 
-    func testNerdGlyphsUseBundledFallbackWhenPrimaryDoesNotSupportThem() {
-        let primary = NSFont(name: "Helvetica", size: 13)!
-        XCTAssertEqual(TerminalFont.font(for: "\u{E0B0}", primary: primary).fontName, "SymbolsNF")
-        XCTAssertEqual(TerminalFont.font(for: "\u{F0001}", primary: primary).fontName, "SymbolsNF")
-    }
+
 }
