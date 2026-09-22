@@ -185,7 +185,7 @@ final class TerminalLinkDetectorTests: XCTestCase {
 
     // MARK: - Routing
 
-    func testExistingHTMLFileRoutesToWebviewWhenEnabled() {
+    func testExistingHTMLFileRoutesToEditorWhenEnabled() {
         let match = TerminalLinkMatch(kind: .path, target: "docs/index.html", raw: "docs/index.html")
         XCTAssertEqual(
             route(match, isFile: { $0 == "/cwd/docs/index.html" }),
