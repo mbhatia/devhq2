@@ -130,6 +130,25 @@ final class CommandPaletteTests: XCTestCase {
     }
 
     @MainActor
+    func testShortcutLabelUsesConfiguredBinding() throws {
+        let bindings = KeyBindingRegistry()
+        try bindings.setDefaultBindings([
+            KeyBinding(shortcut: "cmd+p", commandID: "devhq:command-palette"),
+            KeyBinding(shortcut: "cmd+shift+p", commandID: "devhq:command-palette")
+        ])
+        let controller = CommandPaletteController(
+            commandManager: CommandManager(),
+            bindings: bindings
+        )
+        let command = try RegisteredCommand(
+            id: "devhq:command-palette",
+            viewKinds: [.worktree]
+        ) { _ in }
+
+        XCTAssertEqual(controller.shortcutLabel(for: command), "⌘P, ⇧⌘P")
+    }
+
+    @MainActor
     func testDismissClearsPresentationState() throws {
         let manager = CommandManager()
         try manager.add(id: "file:new", viewKinds: [.file]) { _ in }

@@ -264,3 +264,96 @@ final class LuaCommandTests: XCTestCase {
         )
     }
 }
+
+extension LuaCommandTests {
+    @MainActor
+    func testLuaKeymapLoadsAndSharesDevHQTable() throws {
+        let directory = try makeConfigurationDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeInit(
+            """
+            local command = require "command"
+            local keymap = require "keymap"
+            local devhq = require "devhq"
+            assert(keymap == devhq.keymap)
+            command.add("lua:toggle", nil, function() end)
+            keymap.add { ["command+option+t"] = "lua:toggle" }
+            """,
+            in: directory
+        )
+
+        let registry = KeyBindingRegistry()
+        let manager = CommandManager()
+        let host = LuaPluginHost(
+            settings: EditorSettings(), configDirectory: directory, commandManager: manager,
+            keyBindingRegistry: registry
+        )
+        host.loadUserConfiguration()
+
+        XCTAssertNil(host.settings.pluginError)
+        XCTAssertEqual(registry.binding(for: "lua:toggle")?.shortcut, "cmd+option+t")
+        XCTAssertEqual(registry.displayLabel(for: "lua:toggle"), "⌥⌘T")
+    }
+
+    @MainActor
+    func testLuaKeymapErrorsAreMeaningfulAndLeaveBindingsUntouched() throws {
+        let directory = try makeConfigurationDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeInit(
+            """
+            local keymap = require "keymap"
+            keymap.add { ["cmd+p"] = "missing:command" }
+            """,
+            in: directory
+        )
+
+        let registry = KeyBindingRegistry()
+        let host = LuaPluginHost(
+            settings: EditorSettings(), configDirectory: directory, commandManager: CommandManager(),
+            keyBindingRegistry: registry
+        )
+        host.loadUserConfiguration()
+
+        XCTAssertTrue(host.settings.pluginError?.contains("not registered") == true)
+        XCTAssertTrue(registry.bindings.isEmpty)
+    }
+
+    @MainActor
+    func testLuaKeymapAppliesAtomicallyAndOverwritesOnlyRequestedShortcut() throws {
+        let directory = try makeConfigurationDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeInit(
+            """
+            local keymap = require "keymap"
+            keymap.add({ ["cmd+shift+p"] = "test:replacement" }, true)
+            local ok, message = pcall(keymap.add, {
+              ["cmd+u"] = "test:additional",
+              ["p"] = "test:original"
+            })
+            assert(not ok and string.find(message, "must include a modifier"))
+            """,
+            in: directory
+        )
+
+        let registry = KeyBindingRegistry()
+        try registry.setDefaultBindings([
+            KeyBinding(shortcut: "cmd+shift+p", commandID: "test:original"),
+            KeyBinding(shortcut: "cmd+o", commandID: "test:unrelated")
+        ])
+        let manager = CommandManager()
+        for id in ["test:original", "test:replacement", "test:additional", "test:unrelated"] {
+            try manager.add(id: id, viewKinds: Set(CommandViewKind.allCases)) { _ in }
+        }
+        let host = LuaPluginHost(
+            settings: EditorSettings(), configDirectory: directory, commandManager: manager,
+            keyBindingRegistry: registry
+        )
+        host.loadUserConfiguration()
+
+        XCTAssertNil(host.settings.pluginError)
+        XCTAssertNil(registry.binding(for: "test:original"))
+        XCTAssertEqual(registry.binding(for: "test:replacement")?.shortcut, "cmd+shift+p")
+        XCTAssertEqual(registry.binding(for: "test:unrelated")?.shortcut, "cmd+o")
+        XCTAssertNil(registry.binding(for: "test:additional"))
+    }
+}

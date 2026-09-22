@@ -132,6 +132,25 @@ struct DevHQApp: App {
                 "Could not register built-in commands: \(error.localizedDescription)"
         }
         do {
+            try registerApplicationCommands(
+                in: commandManager,
+                workspace: workspace,
+                commandPalette: commandPalette,
+                commandContext: commandContext
+            )
+            try KeyBindingRegistry.shared.setDefaultBindings([
+                KeyBinding(shortcut: "cmd+shift+o", commandID: "workspace:open-folder"),
+                KeyBinding(shortcut: "cmd+s", commandID: "workspace:save"),
+                KeyBinding(shortcut: "control+shift+`", commandID: "terminal:new"),
+                KeyBinding(shortcut: "cmd+w", commandID: "terminal:close"),
+                KeyBinding(shortcut: "option+t", commandID: "terminal:toggle-drawer"),
+                KeyBinding(shortcut: "cmd+shift+p", commandID: "devhq:command-palette")
+            ])
+        } catch {
+            plugins.settings.pluginError =
+                "Could not register application key bindings: \(error.localizedDescription)"
+        }
+        do {
             try registerWebViewCommands(
                 in: commandManager,
                 workspace: workspace,
@@ -219,6 +238,11 @@ struct DevHQApp: App {
                 commandManager: commandManager,
                 commandPalette: commandPalette,
                 commandContext: commandContext,
+                keyBindingRouter: KeyBindingRouter(
+                    commandManager: commandManager,
+                    context: { commandContext.snapshot(workspace: workspace) },
+                    reportError: { workspace.errorMessage = $0.localizedDescription }
+                ),
                 contextMenuRegistry: plugins.contextMenuRegistry,
                 terminalDrawer: terminalDrawer,
                 sidebarVisibility: sidebarVisibility,
@@ -232,13 +256,11 @@ struct DevHQApp: App {
                 Button("Open Folder…") {
                     workspace.chooseFolder()
                 }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Save") {
                     workspace.saveSelected()
                 }
-                .keyboardShortcut("s")
                 .disabled(workspace.selectedDocument?.isReadOnly != false)
             }
             CommandGroup(after: .saveItem) {
@@ -249,13 +271,11 @@ struct DevHQApp: App {
                         workspace.errorMessage = error.localizedDescription
                     }
                 }
-                .keyboardShortcut("`", modifiers: [.control, .shift])
                 .disabled(workspace.rootURL == nil)
 
                 Button("Close Terminal") {
                     if let terminal = workspace.selectedTerminal { workspace.close(terminal) }
                 }
-                .keyboardShortcut("w", modifiers: [.command])
                 .disabled(workspace.selectedTerminal == nil)
 
                 Button("Toggle Terminal Drawer") {
@@ -265,7 +285,6 @@ struct DevHQApp: App {
                         workspace.errorMessage = error.localizedDescription
                     }
                 }
-                .keyboardShortcut("t", modifiers: [.option])
                 .disabled(workspace.rootURL == nil && terminalDrawer.session == nil)
 
                 Button("Command Palette…") {
@@ -273,7 +292,6 @@ struct DevHQApp: App {
                         in: commandContext.snapshot(workspace: workspace)
                     )
                 }
-                .keyboardShortcut("p", modifiers: [.command, .shift])
             }
         }
     }
@@ -305,9 +323,15 @@ struct DevHQApp: App {
                 workspace: model,
                 worktreeExplorer: worktreeExplorer
             )
+            try registerApplicationCommands(
+                in: commandManager,
+                workspace: model,
+                commandPalette: commandPalette,
+                commandContext: commandContext
+            )
         } catch {
             model.errorMessage =
-                "Could not register built-in commands: \(error.localizedDescription)"
+                "Could not register snapshot commands: \(error.localizedDescription)"
         }
         let content = ContentView(
             workspace: model,
@@ -317,6 +341,11 @@ struct DevHQApp: App {
             commandManager: commandManager,
             commandPalette: commandPalette,
             commandContext: commandContext,
+            keyBindingRouter: KeyBindingRouter(
+                commandManager: commandManager,
+                context: { commandContext.snapshot(workspace: model) },
+                reportError: { model.errorMessage = $0.localizedDescription }
+            ),
             contextMenuRegistry: contextMenuRegistry,
             reviewComments: CommentThreadsController(workspace: model),
             tracksLayoutChanges: false
@@ -405,5 +434,35 @@ struct DevHQApp: App {
         view.cacheDisplay(in: view.bounds, to: image)
         guard let data = image.representation(using: .png, properties: [:]) else { return }
         try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+@MainActor
+private func registerApplicationCommands(
+    in commandManager: CommandManager,
+    workspace: WorkspaceModel,
+    commandPalette: CommandPaletteController,
+    commandContext: CommandContextTracker
+) throws {
+    try commandManager.add(
+        id: "workspace:open-folder",
+        viewKinds: Set(CommandViewKind.allCases)
+    ) { _ in
+        workspace.chooseFolder()
+    }
+
+    try commandManager.add(
+        id: "workspace:save",
+        viewKinds: Set(CommandViewKind.allCases),
+        predicate: { _ in workspace.selectedDocument?.isReadOnly == false }
+    ) { _ in
+        workspace.saveSelected()
+    }
+
+    try commandManager.add(
+        id: "devhq:command-palette",
+        viewKinds: Set(CommandViewKind.allCases)
+    ) { _ in
+        commandPalette.present(in: commandContext.snapshot(workspace: workspace))
     }
 }

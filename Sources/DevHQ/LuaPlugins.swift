@@ -317,6 +317,7 @@ final class LuaPluginHost: ObservableObject {
     let settings: EditorSettings
     let configDirectory: URL
     let commandManager: CommandManager
+    let keyBindingRegistry: KeyBindingRegistry
     let contextMenuRegistry: ContextMenuRegistry
     let agentProfileRegistry: AgentProfileRegistry
     private weak var workspace: WorkspaceModel?
@@ -326,7 +327,8 @@ final class LuaPluginHost: ObservableObject {
         self.init(
             settings: EditorSettings(),
             configDirectory: Self.defaultConfigDirectory(),
-            commandManager: CommandManager()
+            commandManager: CommandManager(),
+            keyBindingRegistry: .shared
         )
     }
 
@@ -335,6 +337,7 @@ final class LuaPluginHost: ObservableObject {
             settings: EditorSettings(),
             configDirectory: Self.defaultConfigDirectory(),
             commandManager: commandManager,
+            keyBindingRegistry: .shared,
             workspace: workspace
         )
     }
@@ -343,7 +346,8 @@ final class LuaPluginHost: ObservableObject {
         self.init(
             settings: settings,
             configDirectory: configDirectory,
-            commandManager: CommandManager()
+            commandManager: CommandManager(),
+            keyBindingRegistry: .shared
         )
     }
 
@@ -351,6 +355,7 @@ final class LuaPluginHost: ObservableObject {
         settings: EditorSettings,
         configDirectory: URL,
         commandManager: CommandManager,
+        keyBindingRegistry: KeyBindingRegistry? = nil,
         workspace: WorkspaceModel? = nil,
         contextMenuRegistry: ContextMenuRegistry? = nil,
         agentProfileRegistry: AgentProfileRegistry? = nil
@@ -358,6 +363,7 @@ final class LuaPluginHost: ObservableObject {
         self.settings = settings
         self.configDirectory = configDirectory
         self.commandManager = commandManager
+        self.keyBindingRegistry = keyBindingRegistry ?? .shared
         self.contextMenuRegistry = contextMenuRegistry ?? ContextMenuRegistry()
         self.agentProfileRegistry = agentProfileRegistry ?? AgentProfileRegistry()
         self.workspace = workspace
@@ -424,6 +430,17 @@ final class LuaPluginHost: ObservableObject {
             state.push(openCommandModule)
         }
 
+        let keymapAPI = LuaKeymapAPI(registry: keyBindingRegistry, commandManager: commandManager)
+        keymapAPI.pushLuaTable(onto: state)
+        let keymapTable = state.popref()
+        let openKeymapModule: LuaClosure = { state in
+            state.push(keymapTable)
+            return 1
+        }
+        try state.requiref(name: keymapAPI.luaName, global: false) {
+            state.push(openKeymapModule)
+        }
+
         let terminalAPI = LuaTerminalAPI(workspace: workspace)
         terminalAPI.pushLuaTable(onto: state)
         let terminalTable = state.popref()
@@ -466,13 +483,15 @@ final class LuaPluginHost: ObservableObject {
             LuaFontsAPI(settings: settings)
         ]
         let openModule: LuaClosure = { state in
-            state.newtable(nrec: CInt(modules.count + 5))
+            state.newtable(nrec: CInt(modules.count + 6))
             for module in modules {
                 module.pushLuaTable(onto: state)
                 state.rawset(-2, utf8Key: module.luaName)
             }
             state.push(commandTable)
             state.rawset(-2, utf8Key: commandAPI.luaName)
+            state.push(keymapTable)
+            state.rawset(-2, utf8Key: keymapAPI.luaName)
             state.push(terminalTable)
             state.rawset(-2, utf8Key: terminalAPI.luaName)
             state.push(contextMenuTable)
