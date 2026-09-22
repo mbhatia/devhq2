@@ -2,8 +2,8 @@ import AppKit
 import CoreText
 import SwiftUI
 
-/// The application-owned typeface used by inherited UI text and default editor
-/// and terminal settings. Explicit user font selections remain separate.
+/// Resolves the system UI typeface separately from the bundled code typeface.
+/// Explicit UI font selections remain separate from editor and terminal defaults.
 enum DevHQFont {
     static let regularPostscriptName = "MartianMonoNFM"
     static let mediumPostscriptName = "MartianMonoNFM-Med"
@@ -19,7 +19,8 @@ enum DevHQFont {
         DevHQResourceBundle.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
     }
 
-    static func font(size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false) -> NSFont {
+    /// The bundled Martian Mono face used only for editor, terminal, and code text.
+    static func codeFont(size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false) -> NSFont {
         let postscriptName: String
         switch weight {
         case .bold, .heavy, .black: postscriptName = boldPostscriptName
@@ -32,9 +33,20 @@ enum DevHQFont {
         return italic ? syntheticOblique(base) : base
     }
 
+    /// The app UI defaults to the macOS system font (SF Pro Regular).
     static func uiFont(named name: String, size: CGFloat = NSFont.systemFontSize) -> Font {
-        if !name.isEmpty, let font = NSFont(name: name, size: size) { return Font(font) }
-        return Font(font(size: size))
+        Font(uiNSFont(named: name, size: size))
+    }
+
+    static func uiNSFont(
+        named name: String,
+        size: CGFloat = NSFont.systemFontSize,
+        weight: NSFont.Weight = .regular,
+        italic: Bool = false
+    ) -> NSFont {
+        let font = (!name.isEmpty ? NSFont(name: name, size: size) : nil)
+            ?? NSFont.systemFont(ofSize: size, weight: weight)
+        return italic ? NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) : font
     }
 
     static func verifiedBundledFontURLs(in resourceBundle: Bundle) -> [URL]? {
@@ -66,11 +78,21 @@ enum DevHQFont {
 }
 
 extension Font {
-    static func devHQ(size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false) -> Font {
-        Font(DevHQFont.font(size: size, weight: weight, italic: italic))
+    /// Uses SF Pro for application controls and labels.
+    static func ui(size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false) -> Font {
+        Font(DevHQFont.uiNSFont(named: "", size: size, weight: weight, italic: italic))
     }
 
-    static func devHQ(_ textStyle: NSFont.TextStyle, weight: NSFont.Weight = .regular, italic: Bool = false) -> Font {
-        .devHQ(size: NSFont.preferredFont(forTextStyle: textStyle).pointSize, weight: weight, italic: italic)
+    static func ui(_ textStyle: NSFont.TextStyle, weight: NSFont.Weight = .regular, italic: Bool = false) -> Font {
+        .ui(size: NSFont.preferredFont(forTextStyle: textStyle).pointSize, weight: weight, italic: italic)
+    }
+
+    /// Uses bundled Martian Mono for source code and terminal-like text.
+    static func code(size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false) -> Font {
+        Font(DevHQFont.codeFont(size: size, weight: weight, italic: italic))
+    }
+
+    static func code(_ textStyle: NSFont.TextStyle, weight: NSFont.Weight = .regular, italic: Bool = false) -> Font {
+        .code(size: NSFont.preferredFont(forTextStyle: textStyle).pointSize, weight: weight, italic: italic)
     }
 }

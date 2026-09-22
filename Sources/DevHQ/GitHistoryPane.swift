@@ -31,7 +31,7 @@ struct GitHistoryPane: View {
                 Image(systemName: "clock.arrow.circlepath")
                     .foregroundStyle(.secondary)
                 Text("Git History")
-                    .font(.devHQ(.caption1))
+                    .font(.ui(.caption1))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 if model.isLoading {
@@ -63,14 +63,14 @@ private struct GitHistoryRow: View {
         case .file(_, let change):
             HStack(spacing: 6) {
                 Text(change.kind.status)
-                    .font(.devHQ(.caption1, weight: .semibold))
+                    .font(.ui(.caption1, weight: .semibold))
                     .foregroundStyle(statusColor(for: change.kind))
                 Text(change.path)
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 if let counts = changeCounts(change) {
                     Text(counts)
-                        .font(.devHQ(.caption2))
+                        .font(.ui(.caption2))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -78,7 +78,7 @@ private struct GitHistoryRow: View {
             .padding(.vertical, 3)
         case .info(let message):
             Text(message)
-                .font(.devHQ(.body, italic: true))
+                .font(.ui(.body, italic: true))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
                 .padding(.vertical, 3)

@@ -35,7 +35,7 @@ struct CommentOverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(header)
-                .font(.devHQ(.caption1, weight: .semibold))
+                .font(.ui(.caption1, weight: .semibold))
                 .foregroundStyle(Color.secondary)
                 .lineLimit(1)
                 .padding(.horizontal, 10)
@@ -49,7 +49,7 @@ struct CommentOverlayView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(thread.messages.enumerated()), id: \.offset) { _, message in
                         Text(line(for: message))
-                            .font(.devHQ(size: 12))
+                            .font(.ui(size: 12))
                             .foregroundStyle(
                                 message.state == .resolved ? Color.secondary : Color.primary
                             )
@@ -66,7 +66,7 @@ struct CommentOverlayView: View {
             VStack(alignment: .leading, spacing: 7) {
                 TextField("Comment", text: $input)
                     .textFieldStyle(.roundedBorder)
-                    .font(.devHQ(size: 12))
+                    .font(.ui(size: 12))
                     .focused($isInputFocused)
                     .accessibilityIdentifier("comment-overlay-input")
                     .onChange(of: input) { newValue in

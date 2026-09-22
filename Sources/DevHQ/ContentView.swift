@@ -348,7 +348,7 @@ private struct WorktreeExplorerSidebar: View {
                 Image(systemName: "arrow.triangle.branch")
                     .foregroundStyle(.secondary)
                 Text("Worktree Explorer")
-                    .font(.devHQ(.headline, weight: .semibold))
+                    .font(.ui(.headline, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
                 Button(action: chooseRepository) {
@@ -367,7 +367,7 @@ private struct WorktreeExplorerSidebar: View {
                     Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 34))
                         .foregroundStyle(.secondary)
-                    Text("No Repositories").font(.devHQ(.title3, weight: .semibold))
+                    Text("No Repositories").font(.ui(.title3, weight: .semibold))
                     Text("Add a local Git repository to browse its worktrees.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -505,7 +505,7 @@ private struct Sidebar: View {
                 Image(systemName: "externaldrive")
                     .foregroundStyle(.secondary)
                 Text(workspace.rootURL?.lastPathComponent ?? "No Folder Open")
-                    .font(.devHQ(.headline, weight: .semibold))
+                    .font(.ui(.headline, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
             }
@@ -519,7 +519,7 @@ private struct Sidebar: View {
                     Image(systemName: "folder")
                         .font(.system(size: 34))
                         .foregroundStyle(.secondary)
-                    Text("Open a Folder").font(.devHQ(.title3, weight: .semibold))
+                    Text("Open a Folder").font(.ui(.title3, weight: .semibold))
                     Text("Choose a project folder to browse its files.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -584,7 +584,7 @@ private struct Sidebar: View {
 
                     if let message = workspace.fileFilterStatusMessage {
                         Text(message)
-                            .font(.devHQ(.caption1))
+                            .font(.ui(.caption1))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -608,11 +608,11 @@ private struct FileRow: View {
             Spacer(minLength: 4)
             if let change = node.value.change {
                 Text(change.kind.status)
-                    .font(.devHQ(.caption1, weight: .semibold))
+                    .font(.ui(.caption1, weight: .semibold))
                     .foregroundStyle(statusColor(for: change.kind))
                     .help(change.kind.label)
                 Text(changeCount(change))
-                    .font(.devHQ(.caption2))
+                    .font(.ui(.caption2))
                     .foregroundStyle(.secondary)
             }
         }
@@ -682,7 +682,7 @@ private struct EditorArea: View {
                         Image(systemName: "doc.text")
                             .font(.system(size: 42))
                             .foregroundStyle(.secondary)
-                        Text("No Tab Open").font(.devHQ(.title2, weight: .semibold))
+                        Text("No Tab Open").font(.ui(.title2, weight: .semibold))
                         Text("Select a file or open a terminal.")
                             .foregroundStyle(.secondary)
                     }
