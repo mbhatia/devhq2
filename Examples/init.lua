@@ -4,6 +4,6 @@ local devhq = require "devhq"
 devhq.window.theme = "light"
 devhq.treeview.size = 300
 devhq.fonts.ui = "Avenir Next"
-devhq.fonts.code = "JetBrainsMono Nerd Font Mono"
-devhq.fonts.terminal = "JetBrainsMono Nerd Font Mono"
+devhq.fonts.code = "MartianMonoNFM"
+devhq.fonts.terminal = "MartianMonoNFM"
 devhq.core.log("Loaded user configuration")

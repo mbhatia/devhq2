@@ -28,6 +28,7 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     private var font: NSFont
     private var boldFont: NSFont
     private var italicFont: NSFont
+    private var boldItalicFont: NSFont
     private var fontName: String
     private(set) var cellWidth: CGFloat = 8
     private(set) var cellHeight: CGFloat = 17
@@ -37,14 +38,16 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     private var selectionEnd: (column: Int, row: Int)?
     private var contextMenuLinkPoint: (column: Int, row: Int)?
     private var applicationMouseTracking = false
+    private let textRenderer = TerminalTextRenderer()
 
     init(session: TerminalSession, fontName: String) {
         self.session = session
         snapshot = session.snapshot
         self.fontName = fontName
-        font = EditorFont.monospaced(named: fontName, size: 13, weight: .regular)
-        boldFont = EditorFont.monospaced(named: fontName, size: 13, weight: .bold)
-        italicFont = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        font = TerminalFont.regular(named: fontName, size: 13)
+        boldFont = TerminalFont.bold(named: fontName, size: 13)
+        italicFont = TerminalFont.italic(named: fontName, size: 13)
+        boldItalicFont = TerminalFont.boldItalic(named: fontName, size: 13)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
@@ -55,10 +58,12 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     func setFont(named name: String) {
         guard fontName != name else { return }
         fontName = name
-        font = EditorFont.monospaced(named: name, size: 13, weight: .regular)
-        boldFont = EditorFont.monospaced(named: name, size: 13, weight: .bold)
-        italicFont = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        font = TerminalFont.regular(named: name, size: 13)
+        boldFont = TerminalFont.bold(named: name, size: 13)
+        italicFont = TerminalFont.italic(named: name, size: 13)
+        boldItalicFont = TerminalFont.boldItalic(named: name, size: 13)
         updateFontMetrics()
+        textRenderer.invalidate()
         updateSize()
     }
 
@@ -116,6 +121,8 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         NSColor(calibratedWhite: 0.08, alpha: 1).setFill()
         dirtyRect.fill()
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // Paint every cell background first. A constrained icon may use the
+        // following blank cell, whose background must not cover its ink.
         for row in snapshot.cells.indices {
             let y = CGFloat(row) * cellHeight
             if y > dirtyRect.maxY || y + cellHeight < dirtyRect.minY { continue }
@@ -127,33 +134,43 @@ final class NativeTerminalView: NSView, NSTextInputClient {
                     width: cellWidth * CGFloat(max(1, cell.width)),
                     height: cellHeight
                 )
-                let selected = isSelected(column: column, row: row)
-                let background = selected
+                let background = isSelected(column: column, row: row)
                     ? NSColor.selectedTextBackgroundColor
                     : (cell.inverse ? cell.foreground?.nsColor : cell.background?.nsColor)
                 if let background {
                     background.setFill()
                     context.fill(rect)
                 }
-                guard !cell.text.isEmpty, cell.text != " " else { continue }
-                let foreground = selected
-                    ? NSColor.selectedTextColor
+            }
+        }
+        for row in snapshot.cells.indices {
+            let y = CGFloat(row) * cellHeight
+            if y > dirtyRect.maxY || y + cellHeight < dirtyRect.minY { continue }
+            let cells = snapshot.cells[row]
+            let foreground: (Int, TerminalCell) -> NSColor = { [weak self] column, cell in
+                guard let self else { return .labelColor }
+                return self.isSelected(column: column, row: row)
+                    ? .selectedTextColor
                     : (cell.inverse ? cell.background?.nsColor : cell.foreground?.nsColor)
                         ?? NSColor(calibratedWhite: 0.88, alpha: 1)
-                var attributes: [NSAttributedString.Key: Any] = [
-                    .font: cell.bold ? boldFont : (cell.italic ? italicFont : font),
-                    .foregroundColor: foreground
-                ]
-                if cell.underline || cell.hyperlink != nil {
-                    attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                }
-                if cell.strikethrough {
-                    attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-                }
-                NSAttributedString(string: cell.text, attributes: attributes).draw(
-                    at: CGPoint(x: rect.minX, y: y + baseline - font.ascender)
-                )
             }
+            textRenderer.draw(
+                row: cells,
+                fonts: .init(regular: font, bold: boldFont, italic: italicFont, boldItalic: boldItalicFont),
+                cellWidth: cellWidth,
+                baseline: baseline,
+                rowOrigin: CGPoint(x: 0, y: y),
+                context: context,
+                foreground: foreground
+            )
+            textRenderer.drawDecorations(
+                row: cells,
+                cellWidth: cellWidth,
+                baseline: baseline,
+                rowOrigin: CGPoint(x: 0, y: y),
+                context: context,
+                foreground: foreground
+            )
         }
         drawCursor(context)
     }

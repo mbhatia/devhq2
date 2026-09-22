@@ -191,7 +191,12 @@ struct FoundationSSHRemoteCommandRunner: SSHRemoteCommandRunning {
 
 actor SSHRemoteRepositoryService: SSHRemoteRepositoryServicing {
     nonisolated static var defaultMirrorRootURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let cacheDirectory = ProcessInfo.processInfo.environment["DEVHQ_CACHE_DIR"],
+           !cacheDirectory.isEmpty {
+            return URL(fileURLWithPath: cacheDirectory, isDirectory: true)
+                .appendingPathComponent("remote-mirrors", isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/devhq/remote-mirrors", isDirectory: true)
     }
 

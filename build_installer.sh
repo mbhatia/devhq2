@@ -96,6 +96,7 @@ need_cmd swift
 [ -f "$SCRIPT_DIR/assets/DevHQ.icns" ] || die "missing app icon: assets/DevHQ.icns"
 [ -f "$SCRIPT_DIR/assets/Lua-LICENSE.txt" ] || die "missing Lua license: assets/Lua-LICENSE.txt"
 [ -f "$SCRIPT_DIR/assets/THIRD-PARTY-NOTICES.md" ] || die "missing third-party notices"
+[ -f "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/MartianMono-LICENSE.txt" ] || die "missing bundled Martian Mono license"
 [ -f "$SCRIPT_DIR/LICENSE" ] || die "missing DevHQ license"
 [ -f "$SCRIPT_DIR/Vendor/ghostty/LICENSE" ] || die "missing Ghostty license; initialize the Ghostty submodule"
 [ -d "$SCRIPT_DIR/ghostty-vt.xcframework" ] || die "missing ghostty-vt.xcframework; run ./Scripts/bootstrap-ghostty.sh"
@@ -168,11 +169,15 @@ done < <(find "$BIN_DIR" -maxdepth 1 -type d -name '*.bundle' -print0)
 [ "$bundle_count" -gt 0 ] || die "no SwiftPM resource bundles were produced"
 [ -d "$RESOURCES_DIR/DevHQ_DevHQ.bundle" ] || die "DevHQ resource bundle was not staged in Contents/Resources"
 [ -d "$RESOURCES_DIR/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "CodeEditLanguages resource bundle was not staged in Contents/Resources"
+[ -f "$RESOURCES_DIR/DevHQ_DevHQ.bundle/Resources/Fonts/MartianMonoNerdFontMono-Regular.ttf" ] || die "bundled terminal regular font was not staged"
+[ -f "$RESOURCES_DIR/DevHQ_DevHQ.bundle/Resources/Fonts/MartianMonoNerdFontMono-Medium.ttf" ] || die "bundled terminal medium font was not staged"
+[ -f "$RESOURCES_DIR/DevHQ_DevHQ.bundle/Resources/Fonts/MartianMonoNerdFontMono-Bold.ttf" ] || die "bundled terminal bold font was not staged"
 
 ditto "$SCRIPT_DIR/LICENSE" "$LEGAL_DIR/DevHQ-LICENSE.txt"
 ditto "$SCRIPT_DIR/assets/Lua-LICENSE.txt" "$LEGAL_DIR/Lua-LICENSE.txt"
 ditto "$LUA_SWIFT_LICENSE" "$LEGAL_DIR/LuaSwift-LICENSE.txt"
 ditto "$SCRIPT_DIR/Vendor/ghostty/LICENSE" "$LEGAL_DIR/Ghostty-LICENSE.txt"
+ditto "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/MartianMono-LICENSE.txt" "$LEGAL_DIR/MartianMono-LICENSE.txt"
 ditto "$SCRIPT_DIR/assets/THIRD-PARTY-NOTICES.md" "$LEGAL_DIR/THIRD-PARTY-NOTICES.md"
 chmod 644 "$RESOURCES_DIR/DevHQ.icns" "$LEGAL_DIR"/*
 
@@ -211,6 +216,14 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </plist>
 PLIST
 plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
+
+# Exercise resource lookup from a relocated app bundle. File-presence checks
+# above cannot catch a SwiftPM Bundle.module fallback to the build directory.
+RELOCATED_APP="$WORK_DIR/relocated/DevHQ Relocated.app"
+mkdir -p "$(dirname "$RELOCATED_APP")"
+ditto "$APP_BUNDLE" "$RELOCATED_APP"
+log "Verifying terminal resources from relocated app..."
+"$RELOCATED_APP/Contents/MacOS/DevHQ" --verify-bundled-resources
 
 codesign_path() {
   local path="$1"

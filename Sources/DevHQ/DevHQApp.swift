@@ -3,6 +3,10 @@ import CodeEditTextView
 import Foundation
 import SwiftUI
 
+private let devHQApplicationName = ProcessInfo.processInfo.environment["DEVHQ_APP_NAME"]
+    .flatMap { $0.isEmpty ? nil : $0 }
+    ?? "DevHQ"
+
 @MainActor
 final class DevHQApplicationDelegate: NSObject, NSApplicationDelegate {
     var terminationHandler: (() -> Void)?
@@ -206,7 +210,7 @@ struct DevHQApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("DevHQ") {
+        WindowGroup(devHQApplicationName) {
             ContentView(
                 workspace: workspace,
                 worktreeExplorer: worktreeExplorer,
@@ -325,7 +329,7 @@ struct DevHQApp: App {
             backing: .buffered,
             defer: false
         )
-        window.title = "DevHQ"
+        window.title = devHQApplicationName
         window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
         snapshotWindow = window

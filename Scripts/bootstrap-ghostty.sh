@@ -3,8 +3,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ghostty="$root/Vendor/ghostty"
-required_zig=0.15.2
-required_commit=41ab6c5ab650465dd65c9957ae0a95225e2c1048
+required_zig=0.16.0
+required_commit=3c47ca159368eb4a860ffe5333abdf4a85b2767b
 
 if ! command -v zig >/dev/null 2>&1; then
   echo "error: Zig $required_zig is required" >&2
@@ -47,6 +47,7 @@ awk '
 
 (cd "$ghostty" && zig build \
   --prefix "$ghostty/zig-out" \
+  -Doptimize=ReleaseFast \
   -Demit-lib-vt=true \
   -Demit-xcframework=true \
   -Demit-terminfo=true)

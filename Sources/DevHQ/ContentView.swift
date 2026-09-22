@@ -231,12 +231,8 @@ struct ContentView: View {
         return .worktree
     }
 
-    private var uiFont: Font? {
-        guard !settings.uiFontName.isEmpty,
-              NSFont(name: settings.uiFontName, size: NSFont.systemFontSize) != nil else {
-            return nil
-        }
-        return .custom(settings.uiFontName, size: NSFont.systemFontSize)
+    private var uiFont: Font {
+        DevHQFont.uiFont(named: settings.uiFontName)
     }
 }
 
@@ -352,7 +348,7 @@ private struct WorktreeExplorerSidebar: View {
                 Image(systemName: "arrow.triangle.branch")
                     .foregroundStyle(.secondary)
                 Text("Worktree Explorer")
-                    .font(.headline)
+                    .font(.ui(.headline, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
                 Button(action: chooseRepository) {
@@ -371,7 +367,7 @@ private struct WorktreeExplorerSidebar: View {
                     Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 34))
                         .foregroundStyle(.secondary)
-                    Text("No Repositories").font(.title3.weight(.semibold))
+                    Text("No Repositories").font(.ui(.title3, weight: .semibold))
                     Text("Add a local Git repository to browse its worktrees.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -509,7 +505,7 @@ private struct Sidebar: View {
                 Image(systemName: "externaldrive")
                     .foregroundStyle(.secondary)
                 Text(workspace.rootURL?.lastPathComponent ?? "No Folder Open")
-                    .font(.headline)
+                    .font(.ui(.headline, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
             }
@@ -523,7 +519,7 @@ private struct Sidebar: View {
                     Image(systemName: "folder")
                         .font(.system(size: 34))
                         .foregroundStyle(.secondary)
-                    Text("Open a Folder").font(.title3.weight(.semibold))
+                    Text("Open a Folder").font(.ui(.title3, weight: .semibold))
                     Text("Choose a project folder to browse its files.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -588,7 +584,7 @@ private struct Sidebar: View {
 
                     if let message = workspace.fileFilterStatusMessage {
                         Text(message)
-                            .font(.caption)
+                            .font(.ui(.caption1))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -612,11 +608,11 @@ private struct FileRow: View {
             Spacer(minLength: 4)
             if let change = node.value.change {
                 Text(change.kind.status)
-                    .font(.caption.monospaced().weight(.semibold))
+                    .font(.ui(.caption1, weight: .semibold))
                     .foregroundStyle(statusColor(for: change.kind))
                     .help(change.kind.label)
                 Text(changeCount(change))
-                    .font(.caption2.monospacedDigit())
+                    .font(.ui(.caption2))
                     .foregroundStyle(.secondary)
             }
         }
@@ -686,7 +682,7 @@ private struct EditorArea: View {
                         Image(systemName: "doc.text")
                             .font(.system(size: 42))
                             .foregroundStyle(.secondary)
-                        Text("No Tab Open").font(.title2.weight(.semibold))
+                        Text("No Tab Open").font(.ui(.title2, weight: .semibold))
                         Text("Select a file or open a terminal.")
                             .foregroundStyle(.secondary)
                     }

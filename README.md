@@ -21,8 +21,8 @@ local devhq = require "devhq"
 devhq.window.theme = "light" -- "system", "light", or "dark"
 devhq.treeview.size = 300
 devhq.fonts.ui = "Avenir Next"
-devhq.fonts.code = "JetBrainsMono Nerd Font Mono"
-devhq.fonts.terminal = "JetBrainsMono Nerd Font Mono"
+devhq.fonts.code = "MartianMonoNFM"
+devhq.fonts.terminal = "MartianMonoNFM"
 ```
 
 The `devhq` module follows the same broad separation used by Lite XL:
@@ -34,6 +34,10 @@ The `devhq` module follows the same broad separation used by Lite XL:
 - `docview`: gutter, minimap, and folding-ribbon visibility
 - `fonts`: installed font names for UI, code, and terminal text
 - `terminal`: terminal-tab creation
+
+Without a `fonts.ui` override, the app UI uses the macOS system font (SF Pro). The
+bundled Martian Mono font remains the default for code and terminal text; DevHQ
+does not distribute the system UI font.
 
 Lua modules below the configuration directory can be loaded normally. For example,
 `require "plugins.statusbar"` loads `~/.config/devhq/plugins/statusbar.lua`. See
@@ -141,9 +145,12 @@ git submodule update --init
 ./Scripts/bootstrap-ghostty.sh test
 ```
 
-The bootstrap requires Zig 0.15.2, verifies Ghostty commit
-`41ab6c5ab650465dd65c9957ae0a95225e2c1048`, builds
+The bootstrap requires Zig 0.16.0, verifies Ghostty commit
+`3c47ca159368eb4a860ffe5333abdf4a85b2767b`, builds
 `ghostty-vt.xcframework`, and installs Ghostty's `xterm-ghostty` terminfo data.
+This revision includes upstream batched text/Unicode processing optimizations.
+Terminal history retains approximately 10,000 lines, bounded by Ghostty's native
+50 MB scrollback allocation limit (both limits are enforced at page granularity).
 Ghostty is licensed under the MIT license; its license is retained at
 `Vendor/ghostty/LICENSE`.
 

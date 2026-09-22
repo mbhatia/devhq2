@@ -122,13 +122,22 @@ struct WorkspaceStateStore: WorkspaceStatePersisting {
         fileManager: FileManager = .default
     ) {
         let homeDirectory = fileManager.homeDirectoryForCurrentUser
+        let environment = ProcessInfo.processInfo.environment
         self.configDirectory = configDirectory
+            ?? environment["DEVHQ_CONFIG_DIR"].flatMap(Self.directoryURL)
+                .map { $0.appendingPathComponent("ws", isDirectory: true) }
             ?? homeDirectory.appendingPathComponent(".config/devhq/ws", isDirectory: true)
         self.cacheDirectory = cacheDirectory
+            ?? environment["DEVHQ_CACHE_DIR"].flatMap(Self.directoryURL)
+                .map { $0.appendingPathComponent("ws", isDirectory: true) }
             ?? homeDirectory.appendingPathComponent(".cache/devhq/ws", isDirectory: true)
         self.fileManager = fileManager
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
+    }
+
+    private static func directoryURL(_ path: String) -> URL? {
+        path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
     }
 
     var repositoriesFileURL: URL {

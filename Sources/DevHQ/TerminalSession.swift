@@ -142,8 +142,16 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// Called for text, key, or paste input originating in the terminal view.
     var onUserInput: (() -> Void)?
     private var nativeHandle: OpaquePointer?
+    private var nativeColumns = 80
+    private var nativeRows = 24
+    private var nativePixelWidth: UInt32 = 0
+    private var nativePixelHeight: UInt32 = 0
     private var timer: Timer?
+    private var outputReader: TerminalOutputReader?
     private var parser = TerminalParser(columns: 80, rows: 24)
+    /// Bytes successfully supplied to the production terminal parser.
+    var processedOutputByteCount: UInt64 { outputReader?.processedByteCount ?? publishedOutputByteCount }
+    private var publishedOutputByteCount: UInt64 = 0
     private let hostServices: TerminalHostServices
     private var pendingNotification: (title: String, body: String)?
     private var lastNotificationDate = Date.distantPast
@@ -166,12 +174,9 @@ final class TerminalSession: ObservableObject, Identifiable {
         self.rootURL = rootURL
         self.currentDirectory = workingDirectory
         self.hostServices = hostServices ?? SystemTerminalHostServices.shared
+        self.parser = TerminalParser(columns: 80, rows: 24, tracksCells: !Self.usesGhosttyRenderer)
         let shell = shell ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let packagedResourceBundleURL = Bundle.main.resourceURL?
-            .appendingPathComponent("DevHQ_DevHQ.bundle", isDirectory: true)
-        let resourceBundle = packagedResourceBundleURL.flatMap { Bundle(url: $0) } ?? Bundle.module
-        let terminfo = resourceBundle.resourceURL?
-            .appendingPathComponent("terminfo", isDirectory: true).path
+        let terminfo = DevHQResourceBundle.directoryURL(named: "terminfo")?.path
         let argumentPointers = command?.map { strdup($0) } ?? []
         defer { argumentPointers.forEach { free($0) } }
         guard !argumentPointers.contains(where: { $0 == nil }) else {
@@ -197,6 +202,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         }
         guard let nativeHandle else { throw TerminalSessionError.couldNotStart }
         processID = devhq_terminal_pid(nativeHandle)
+        if Self.usesGhosttyRenderer { outputReader = TerminalOutputReader(handle: nativeHandle) }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) {
             [weak self] _ in
             MainActor.assumeIsolated { self?.drain() }
@@ -206,6 +212,7 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     deinit {
         timer?.invalidate()
+        outputReader?.stop()
         if let nativeHandle { devhq_terminal_close(nativeHandle) }
     }
 
@@ -346,24 +353,39 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard let nativeHandle else { return }
         let columns = max(1, min(columns, Int(UInt16.max)))
         let rows = max(1, min(rows, Int(UInt16.max)))
-        parser.resize(columns: columns, rows: rows)
-        _ = devhq_terminal_resize(
+        let pixelWidth = UInt32(clamping: pixelWidth)
+        let pixelHeight = UInt32(clamping: pixelHeight)
+        // AppKit can repeat identical layout callbacks. Publishing a new
+        // snapshot here would trigger another SwiftUI update without a resize.
+        guard columns != nativeColumns || rows != nativeRows ||
+                pixelWidth != nativePixelWidth || pixelHeight != nativePixelHeight else { return }
+        guard devhq_terminal_resize(
             nativeHandle,
             UInt16(columns),
             UInt16(rows),
-            UInt32(clamping: pixelWidth),
-            UInt32(clamping: pixelHeight)
-        )
+            pixelWidth,
+            pixelHeight
+        ) else { return }
+        nativeColumns = columns
+        nativeRows = rows
+        nativePixelWidth = pixelWidth
+        nativePixelHeight = pixelHeight
+        if !Self.usesGhosttyRenderer { parser.resize(columns: columns, rows: rows) }
         if active { publishParserState() }
     }
 
     func scroll(lines: Int) {
-        parser.scrollViewport(lines: lines)
+        if let nativeHandle, Self.usesGhosttyRenderer {
+            _ = devhq_terminal_scroll(nativeHandle, lines)
+        } else {
+            parser.scrollViewport(lines: lines)
+        }
         if active { publishParserState() }
     }
 
     func text(from start: (column: Int, row: Int), to end: (column: Int, row: Int)) -> String {
-        parser.text(from: start, to: end)
+        let source = makeGhosttySnapshot() ?? parser.snapshot()
+        return Self.text(in: source, from: start, to: end)
     }
 
     func openHyperlink(at point: (column: Int, row: Int)) -> Bool {
@@ -404,6 +426,9 @@ final class TerminalSession: ObservableObject, Identifiable {
         closed = true
         timer?.invalidate()
         timer = nil
+        outputReader?.stop()
+        if let outputReader { publishedOutputByteCount = outputReader.processedByteCount }
+        outputReader = nil
         if let nativeHandle {
             devhq_terminal_close(nativeHandle)
             self.nativeHandle = nil
@@ -413,16 +438,37 @@ final class TerminalSession: ObservableObject, Identifiable {
     private func drain() {
         guard let nativeHandle else { return }
         var changed = false
-        var buffer = [UInt8](repeating: 0, count: 32 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBufferPointer {
-                devhq_terminal_read(nativeHandle, $0.baseAddress, $0.count)
+        var naturalExit: Int?
+        if exitStatus == nil {
+            var status: Int32 = 0
+            if devhq_terminal_poll_exit(nativeHandle, &status) {
+                // waitpid can win the race with the readiness callback. Consume
+                // its trailing PTY output before publishing or invoking onExit.
+                outputReader?.finishAvailableOutput()
+                naturalExit = Int(status)
+                changed = true
             }
-            guard count > 0 else { break }
-            parser.feed(buffer.prefix(Int(count)))
-            changed = true
         }
-        for effect in parser.takeEffects() {
+        let effects: [TerminalEffect]
+        if let outputReader {
+            let update = outputReader.takeUpdate()
+            changed = changed || update.bytes != publishedOutputByteCount
+            publishedOutputByteCount = update.bytes
+            effects = update.effects
+        } else {
+            var buffer = [UInt8](repeating: 0, count: 32 * 1024)
+            while true {
+                let count = buffer.withUnsafeMutableBufferPointer {
+                    devhq_terminal_read(nativeHandle, $0.baseAddress, $0.count)
+                }
+                guard count > 0 else { break }
+                parser.feed(buffer.prefix(Int(count)))
+                publishedOutputByteCount &+= UInt64(count)
+                changed = true
+            }
+            effects = parser.takeEffects()
+        }
+        for effect in effects {
             switch effect {
             case .bell:
                 onAttention?()
@@ -434,17 +480,20 @@ final class TerminalSession: ObservableObject, Identifiable {
             }
         }
         deliverPendingNotification()
-        if exitStatus == nil {
-            var status: Int32 = 0
-            if devhq_terminal_poll_exit(nativeHandle, &status) {
-                exitStatus = Int(status)
-                changed = true
-                deliverNaturalExitIfNeeded()
+        if let naturalExit { exitStatus = naturalExit }
+        if Self.usesGhosttyRenderer {
+            let updatedTitle = nativeString(devhq_terminal_title) ?? "Terminal"
+            if title != updatedTitle { title = updatedTitle }
+            if let value = nativeString(devhq_terminal_working_directory),
+               let cwd = URL(string: value), cwd.isFileURL, cwd != currentDirectory {
+                currentDirectory = cwd
             }
+        } else {
+            if title != parser.title { title = parser.title }
+            if let cwd = parser.currentDirectory, cwd != currentDirectory { currentDirectory = cwd }
         }
-        if title != parser.title { title = parser.title }
-        if let cwd = parser.currentDirectory, cwd != currentDirectory { currentDirectory = cwd }
-        if changed, active { publishParserState() }
+        if changed, active, !closed { publishParserState() }
+        deliverNaturalExitIfNeeded()
     }
 
     private func deliverPendingNotification() {
@@ -477,6 +526,24 @@ final class TerminalSession: ObservableObject, Identifiable {
         snapshot.cells.map { row in
             row.map(\.text).joined()
                 .replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression)
+        }.joined(separator: "\n")
+    }
+
+    private static func text(
+        in snapshot: TerminalRenderSnapshot,
+        from start: (column: Int, row: Int), to end: (column: Int, row: Int)
+    ) -> String {
+        let first = min(start.row, end.row)
+        let last = max(start.row, end.row)
+        return (first...last).compactMap { row in
+            guard snapshot.cells.indices.contains(row) else { return nil }
+            let lower = row == first ? (start.row <= end.row ? start.column : end.column) : 0
+            let upper = row == last ? (start.row <= end.row ? end.column : start.column) : snapshot.columns - 1
+            let boundedLower = max(0, lower)
+            let boundedUpper = min(snapshot.columns - 1, upper)
+            guard boundedLower <= boundedUpper else { return "" }
+            return snapshot.cells[row][boundedLower...boundedUpper]
+                .map(\.text).joined().replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression)
         }.joined(separator: "\n")
     }
 
@@ -518,15 +585,15 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     private func makeGhosttySnapshot() -> TerminalRenderSnapshot? {
         guard devhq_terminal_uses_ghostty(), let nativeHandle else { return nil }
-        let fallback = parser.snapshot()
         var nativeSnapshot = DevHQTerminalSnapshot()
         var nativeCells = [DevHQTerminalCell](
             repeating: DevHQTerminalCell(),
-            count: fallback.columns * fallback.rows
+            count: max(1, nativeColumns * nativeRows)
         )
         let success = nativeCells.withUnsafeMutableBufferPointer {
             devhq_terminal_snapshot(nativeHandle, $0.baseAddress, $0.count, &nativeSnapshot)
         }
+        defer { devhq_terminal_snapshot_free(&nativeSnapshot) }
         guard success,
               nativeSnapshot.columns > 0,
               nativeSnapshot.rows > 0 else { return nil }
@@ -535,7 +602,11 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard nativeCells.count >= columns * rows else { return nil }
         let cells = (0..<rows).map { row in
             (0..<columns).map { column in
-                Self.cell(from: nativeCells[row * columns + column])
+                Self.cell(
+                    from: nativeCells[row * columns + column],
+                    graphemes: nativeSnapshot.graphemes,
+                    graphemeCount: Int(nativeSnapshot.grapheme_count)
+                )
             }
         }
         let cursorStyle: TerminalCursorStyle = switch nativeSnapshot.cursor_style {
@@ -551,17 +622,40 @@ final class TerminalSession: ObservableObject, Identifiable {
             cursorRow: Int(nativeSnapshot.cursor_row),
             cursorVisible: nativeSnapshot.cursor_visible != 0,
             cursorStyle: cursorStyle,
-            scrollbackCount: fallback.scrollbackCount,
-            scrollOffset: fallback.scrollOffset
+            scrollbackCount: Int(nativeSnapshot.scrollback_rows),
+            scrollOffset: Int(nativeSnapshot.scroll_offset)
         )
     }
 
-    private static func cell(from native: DevHQTerminalCell) -> TerminalCell {
-        let codepoints = [
-            native.codepoint0, native.codepoint1, native.codepoint2, native.codepoint3,
-            native.codepoint4, native.codepoint5, native.codepoint6, native.codepoint7
-        ]
-        let scalars = codepoints.prefix(Int(native.codepoint_count)).compactMap(UnicodeScalar.init)
+    private func nativeString(
+        _ read: (OpaquePointer?, UnsafeMutablePointer<UInt8>?, Int) -> Int
+    ) -> String? {
+        guard let nativeHandle else { return nil }
+        let count = read(nativeHandle, nil, 0)
+        guard count > 0, count <= 64 * 1024 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: count)
+        let copied = bytes.withUnsafeMutableBufferPointer { read(nativeHandle, $0.baseAddress, $0.count) }
+        guard copied == count else { return nil }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+
+    private static func cell(
+        from native: DevHQTerminalCell,
+        graphemes: UnsafeMutablePointer<UInt32>?,
+        graphemeCount: Int
+    ) -> TerminalCell {
+        let offset = Int(native.grapheme_offset)
+        let length = Int(native.grapheme_length)
+        let scalars: [UnicodeScalar]
+        if length > 0,
+           offset <= graphemeCount,
+           length <= graphemeCount - offset,
+           let graphemes {
+            scalars = UnsafeBufferPointer(start: graphemes + offset, count: length)
+                .compactMap(UnicodeScalar.init)
+        } else {
+            scalars = []
+        }
         let text = scalars.isEmpty ? " " : String(String.UnicodeScalarView(scalars))
         return TerminalCell(
             text: text,
@@ -586,6 +680,134 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 }
 
+/// Read readiness, VT parsing and OSC scanning never wait on the UI cadence.
+/// Serial queues own gathering and parsing. The small lock only transfers effects
+/// and counters; render snapshots remain coalesced by the session's UI timer.
+private final class TerminalOutputReader: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "devhq.terminal-output", qos: .default)
+    private let handle: OpaquePointer
+    private let parseQueue = DispatchQueue(label: "devhq.terminal-parser", qos: .default)
+    // At most four 64 KiB batches may wait for parsing; a fast producer cannot
+    // grow memory without bound or displace already-read bytes.
+    private let availableBatches = DispatchSemaphore(value: 4)
+    private var source: DispatchSourceRead?
+    private var stopped = false
+    private let cancelled = DispatchSemaphore(value: 0)
+    private var parser = TerminalParser(columns: 80, rows: 24, tracksCells: false)
+    private var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    private var buffered = 0
+    private let updateLock = NSLock()
+    private var byteCount: UInt64 = 0
+    private var effects: [TerminalEffect] = []
+
+    init(handle: OpaquePointer) {
+        self.handle = handle
+        let source = DispatchSource.makeReadSource(fileDescriptor: devhq_terminal_fd(handle), queue: queue)
+        self.source = source
+        source.setEventHandler { [weak self] in self?.readAvailable() }
+        let cancelled = self.cancelled
+        source.setCancelHandler { cancelled.signal() }
+        source.resume()
+    }
+
+    func stop() {
+        let needsWait = queue.sync {
+            guard !stopped else { return false }
+            stopped = true
+            source?.cancel()
+            source = nil
+            return true
+        }
+        // Cancellation is asynchronous: only its completion handler guarantees
+        // dispatch has released the descriptor before close can recycle it.
+        if needsWait {
+            cancelled.wait()
+            parseQueue.sync {}
+        }
+    }
+
+    func finishAvailableOutput() {
+        queue.sync {
+            // Snapshot the kernel's remaining bytes after waitpid. A surviving
+            // descendant may keep writing; do not wait for that writer forever
+            // on the main actor while finalizing the original child.
+            let remaining = devhq_terminal_available_output(handle)
+            if remaining > 0 { readAvailable(byteLimit: remaining, isFinalRead: true) }
+            submitBufferedOutput()
+        }
+        parseQueue.sync {}
+    }
+
+    var processedByteCount: UInt64 {
+        updateLock.lock()
+        defer { updateLock.unlock() }
+        return byteCount
+    }
+
+    func takeUpdate() -> (bytes: UInt64, effects: [TerminalEffect]) {
+        updateLock.lock()
+        defer { updateLock.unlock() }
+        let result = (byteCount, effects)
+        effects.removeAll(keepingCapacity: true)
+        return result
+    }
+
+    private func readAvailable(byteLimit: Int = 2 * 1024 * 1024, isFinalRead: Bool = false) {
+        guard !stopped else { return }
+        // Bound each callback so cancellation cannot be starved by a producer.
+        var received = 0
+        // A final read has a fixed kernel byte count; consume that entire
+        // snapshot before its parse barrier, rather than deferring a remainder.
+        let deadline = isFinalRead ? UInt64.max : DispatchTime.now().uptimeNanoseconds + 8_000_000
+        while received < byteLimit, DispatchTime.now().uptimeNanoseconds < deadline {
+            let count = buffer.withUnsafeMutableBufferPointer {
+                devhq_terminal_gather_output(handle, $0.baseAddress?.advanced(by: buffered), min($0.count - buffered, byteLimit - received))
+            }
+            if count <= 0 {
+                if count < 0 {
+                    source?.cancel()
+                    source = nil
+                    submitBufferedOutput()
+                }
+                break
+            }
+            buffered += Int(count)
+            received += Int(count)
+            if buffered == buffer.count { submitBufferedOutput() }
+        }
+        submitBufferedOutput()
+        if !isFinalRead, received >= byteLimit || DispatchTime.now().uptimeNanoseconds >= deadline {
+            // A readiness source need not deliver a fresh edge while data is
+            // still buffered. Explicitly continue after either fairness budget.
+            queue.async { [weak self] in self?.readAvailable() }
+        }
+    }
+
+    private func submitBufferedOutput() {
+        guard buffered > 0 else { return }
+        availableBatches.wait()
+        let bytes = Array(buffer.prefix(buffered))
+        buffered = 0
+        parseQueue.async { [self] in
+            bytes.withUnsafeBufferPointer { devhq_terminal_feed(handle, $0.baseAddress, $0.count) }
+            parser.feed(bytes[...])
+            let pending = parser.takeEffects()
+            updateLock.lock()
+            byteCount &+= UInt64(bytes.count)
+            for effect in pending {
+                if let index = effects.firstIndex(where: { $0.hasSameKind(as: effect) }) {
+                    effects[index] = effect
+                } else {
+                    effects.append(effect)
+                }
+            }
+            updateLock.unlock()
+            availableBatches.signal()
+        }
+    }
+
+}
+
 enum TerminalSpecialKey: Int32 {
     case up, down, left, right, home, end, pageUp, pageDown, delete
     case backspace, tab, returnKey, escape
@@ -595,6 +817,13 @@ enum TerminalEffect: Equatable {
     case bell
     case notification(title: String, body: String)
     case clipboardWrite(String)
+
+    func hasSameKind(as other: TerminalEffect) -> Bool {
+        switch (self, other) {
+        case (.bell, .bell), (.notification, .notification), (.clipboardWrite, .clipboardWrite): true
+        default: false
+        }
+    }
 }
 
 struct TerminalParser {
@@ -606,7 +835,13 @@ struct TerminalParser {
     private var groundUTF8ContinuationCount = 0
     private var oscUTF8ContinuationCount = 0
     private var oscOverflowed = false
+    /// Last ordinary bytes skipped by the Ghostty sidecar fast path. They let
+    /// us distinguish C1 OSC from a UTF-8 continuation split across reads.
+    private var skippedUTF8Tail: [UInt8] = []
     private var pendingEffects: [TerminalEffect] = []
+    /// Ghostty owns the screen and scrollback in production. This parser is
+    /// retained there only for OSC effects not exposed by libghostty.
+    private let tracksCells: Bool
     private var cells: [[TerminalCell]]
     private var history: [[TerminalCell]] = []
     private var alternateCells: [[TerminalCell]]?
@@ -625,13 +860,58 @@ struct TerminalParser {
     private(set) var bracketedPaste = false
     private(set) var focusReporting = false
 
-    init(columns: Int, rows: Int) {
+    init(columns: Int, rows: Int, tracksCells: Bool = true) {
         self.columns = columns
         self.rows = rows
+        self.tracksCells = tracksCells
         cells = Self.blankGrid(columns: columns, rows: rows)
     }
 
+    /// The Ghostty sidecar only needs to notice control sequences. Avoid
+    /// visiting/render-decoding every printable byte in high-volume output.
+    mutating func feed(_ bytes: ArraySlice<UInt8>) {
+        guard !tracksCells else {
+            feedGeneric(bytes)
+            return
+        }
+        var index = bytes.startIndex
+        while index < bytes.endIndex {
+            if case .csi = state {
+                // Ghostty already handles CSI, including modes and colors. The
+                // sidecar only needs its boundary, not strings/parameter arrays.
+                guard let final = bytes[index...].firstIndex(where: { (0x40...0x7e).contains($0) }) else { return }
+                state = .ground
+                index = bytes.index(after: final)
+                continue
+            }
+            guard case .ground = state else {
+                feedGeneric(CollectionOfOne(bytes[index]))
+                index = bytes.index(after: index)
+                continue
+            }
+            guard let control = bytes[index...].firstIndex(where: {
+                $0 == 0x07 || $0 == 0x1b || $0 == 0x9d
+            }) else {
+                rememberSkipped(bytes[index...])
+                return
+            }
+            rememberSkipped(bytes[index..<control])
+            if bytes[control] == 0x9d, c1OSCIsUTF8Continuation() {
+                rememberSkipped(CollectionOfOne(bytes[control]))
+                index = bytes.index(after: control)
+                continue
+            }
+            feedGeneric(CollectionOfOne(bytes[control]))
+            skippedUTF8Tail.removeAll(keepingCapacity: true)
+            index = bytes.index(after: control)
+        }
+    }
+
     mutating func feed<S: Sequence>(_ bytes: S) where S.Element == UInt8 {
+        feedGeneric(bytes)
+    }
+
+    private mutating func feedGeneric<S: Sequence>(_ bytes: S) where S.Element == UInt8 {
         for byte in bytes {
             switch state {
             case .ground:
@@ -694,6 +974,34 @@ struct TerminalParser {
         flushPrintable()
     }
 
+    private mutating func rememberSkipped<S: BidirectionalCollection>(_ bytes: S) where S.Element == UInt8 {
+        if bytes.count >= 3 { skippedUTF8Tail = Array(bytes.suffix(3)) }
+        else {
+            skippedUTF8Tail.append(contentsOf: bytes)
+            if skippedUTF8Tail.count > 3 { skippedUTF8Tail.removeFirst(skippedUTF8Tail.count - 3) }
+        }
+    }
+
+    private func c1OSCIsUTF8Continuation() -> Bool {
+        let previous = skippedUTF8Tail
+        var continuations = 0
+        for byte in previous.reversed() {
+            guard (0x80...0xbf).contains(byte) else {
+                let required: Int
+                switch byte {
+                case 0xc2...0xdf: required = 1
+                case 0xe0...0xef: required = 2
+                case 0xf0...0xf4: required = 3
+                default: return false
+                }
+                return continuations < required
+            }
+            continuations += 1
+            if continuations == 3 { return false }
+        }
+        return false
+    }
+
     mutating func takeEffects() -> [TerminalEffect] {
         defer { pendingEffects.removeAll(keepingCapacity: true) }
         return pendingEffects
@@ -701,6 +1009,11 @@ struct TerminalParser {
 
     mutating func resize(columns newColumns: Int, rows newRows: Int) {
         guard newColumns != columns || newRows != rows else { return }
+        guard tracksCells else {
+            columns = newColumns
+            rows = newRows
+            return
+        }
         var resized = Self.blankGrid(columns: newColumns, rows: newRows)
         for y in 0..<min(rows, newRows) {
             for x in 0..<min(columns, newColumns) { resized[y][x] = cells[y][x] }
@@ -756,7 +1069,12 @@ struct TerminalParser {
     }
 
     private mutating func flushPrintable() {
-        guard !printable.isEmpty, let string = String(bytes: printable, encoding: .utf8) else { return }
+        guard !printable.isEmpty else { return }
+        guard tracksCells else {
+            printable.removeAll(keepingCapacity: true)
+            return
+        }
+        guard let string = String(bytes: printable, encoding: .utf8) else { return }
         printable.removeAll(keepingCapacity: true)
         for character in string { put(character) }
     }
@@ -779,6 +1097,7 @@ struct TerminalParser {
     }
 
     private mutating func lineFeed() {
+        guard tracksCells else { return }
         if row == rows - 1 {
             if alternateCells == nil {
                 history.append(cells.removeFirst())
@@ -790,6 +1109,7 @@ struct TerminalParser {
     }
 
     private mutating func reverseIndex() {
+        guard tracksCells else { return }
         if row == 0 {
             cells.insert(Array(repeating: TerminalCell(), count: columns), at: 0)
             cells.removeLast()
@@ -797,6 +1117,7 @@ struct TerminalParser {
     }
 
     private mutating func reset() {
+        guard tracksCells else { return }
         cells = Self.blankGrid(columns: columns, rows: rows)
         history.removeAll()
         column = 0
@@ -813,6 +1134,16 @@ struct TerminalParser {
         let body = privateMode ? String(raw.dropFirst()) : raw
         let params = body.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
         let first = max(1, params.first ?? 1)
+        if !tracksCells {
+            if privateMode && (final == 0x68 || final == 0x6c) {
+                let enabled = final == 0x68
+                for mode in params {
+                    if mode == 1004 { focusReporting = enabled }
+                    if mode == 2004 { bracketedPaste = enabled }
+                }
+            }
+            return
+        }
         switch UnicodeScalar(final) {
         case "A": row = max(0, row - first)
         case "B": row = min(rows - 1, row + first)
@@ -925,13 +1256,7 @@ struct TerminalParser {
     }
 
     private mutating func enqueue(_ effect: TerminalEffect) {
-        let matchingIndex = pendingEffects.firstIndex {
-            switch ($0, effect) {
-            case (.bell, .bell), (.notification, .notification),
-                 (.clipboardWrite, .clipboardWrite): true
-            default: false
-            }
-        }
+        let matchingIndex = pendingEffects.firstIndex { $0.hasSameKind(as: effect) }
         if let matchingIndex { pendingEffects[matchingIndex] = effect }
         else { pendingEffects.append(effect) }
     }

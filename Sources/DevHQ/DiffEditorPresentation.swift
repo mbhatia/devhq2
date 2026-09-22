@@ -293,7 +293,7 @@ private struct DiffHunkOverlay: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(hunk.header)
-                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .font(.code(.caption1, weight: .semibold))
                 .foregroundStyle(Color.secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
@@ -323,7 +323,7 @@ private struct DiffHunkOverlay: View {
 
     private func hunkLine(_ text: String, kind: DiffEditorHunk.Line.Kind) -> some View {
         Text(text)
-            .font(.system(size: 12, design: .monospaced))
+            .font(.code(size: 12))
             .foregroundStyle(kind.foregroundColor)
             .padding(.horizontal, 8)
             .frame(minHeight: 19)

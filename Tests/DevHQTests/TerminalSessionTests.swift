@@ -1,9 +1,40 @@
 import Darwin
+import Combine
 import Foundation
 import XCTest
 @testable import DevHQ
 
 final class TerminalSessionTests: XCTestCase {
+    @MainActor
+    func testUnchangedSizeAndMetadataDoNotRepublishState() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(rootURL: root, command: ["/bin/sleep", "5"])
+        defer { session.close() }
+        var snapshots = 0
+        var titles = 0
+        var directories = 0
+        let observations = [
+            session.$snapshot.dropFirst().sink { _ in snapshots += 1 },
+            session.$title.dropFirst().sink { _ in titles += 1 },
+            session.$currentDirectory.dropFirst().sink { _ in directories += 1 }
+        ]
+        defer { observations.forEach { $0.cancel() } }
+
+        // Initial bridge geometry is already 80x24 with zero pixel dimensions.
+        session.resize(columns: 80, rows: 24, pixelWidth: 0, pixelHeight: 0)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.12))
+        XCTAssertEqual(snapshots, 0)
+        XCTAssertEqual(titles, 0)
+        XCTAssertEqual(directories, 0)
+
+        // The first actual frame still updates its native cell pixel metrics.
+        session.resize(columns: 80, rows: 24, pixelWidth: 640, pixelHeight: 408)
+        XCTAssertEqual(snapshots, 1)
+        session.resize(columns: 80, rows: 24, pixelWidth: 640, pixelHeight: 408)
+        XCTAssertEqual(snapshots, 1)
+    }
+
     func testBELProducesAttentionEffect() {
         var parser = TerminalParser(columns: 20, rows: 2)
         parser.feed(Array("before\u{7}after".utf8))
@@ -75,6 +106,64 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(parser.snapshot().cells[0][0].text, "Ý")
     }
 
+    func testEffectsOnlyParserRecognizesOSC9OSC52AndBELAcrossChunks() {
+        var parser = TerminalParser(columns: 20, rows: 2, tracksCells: false)
+        let first = Array("ordinary\u{1B}]9;complete\u{7}\u{1B}]52;c;Y2xpc".utf8)
+        parser.feed(first[first.startIndex...])
+        let second = Array("GJvYXJk\u{7}\u{7}more ordinary output".utf8)
+        parser.feed(second[second.startIndex...])
+
+        XCTAssertEqual(parser.takeEffects(), [
+            .notification(title: "DevHQ Terminal", body: "complete"),
+            .clipboardWrite("clipboard"),
+            .bell
+        ])
+    }
+
+    func testEffectsOnlyParserDistinguishesUTF8Continuation9DFromC1OSC() {
+        var parser = TerminalParser(columns: 20, rows: 2, tracksCells: false)
+        let leadingUTF8Byte: [UInt8] = Array("ordinary ".utf8) + [0xc3]
+        parser.feed(leadingUTF8Byte[leadingUTF8Byte.startIndex...])
+
+        // 0x9d completes the split UTF-8 encoding of "Ý"; it is not C1 OSC.
+        let continuationAndText: [UInt8] = [0x9d] + Array(" ordinary".utf8)
+        parser.feed(continuationAndText[continuationAndText.startIndex...])
+
+        let actualC1OSC: [UInt8] = [0x9d] + Array("9;actual-c1".utf8) + [0x9c]
+        parser.feed(actualC1OSC[actualC1OSC.startIndex...])
+
+        XCTAssertEqual(parser.takeEffects(), [
+            .notification(title: "DevHQ Terminal", body: "actual-c1")
+        ])
+
+        let bytes: [UInt8] = Array("prefix Ý suffix".utf8)
+            + [0x9d] + Array("9;split-in-any-position".utf8) + [0x9c]
+        for split in 0...bytes.count {
+            var splitParser = TerminalParser(columns: 20, rows: 2, tracksCells: false)
+            splitParser.feed(bytes[..<split])
+            splitParser.feed(bytes[split...])
+            XCTAssertEqual(
+                splitParser.takeEffects(),
+                [.notification(title: "DevHQ Terminal", body: "split-in-any-position")],
+                "split at byte \(split)"
+            )
+        }
+    }
+
+    func testParserScrollUpShowsOlderRowsAndUsesBottomRelativeOffset() {
+        var parser = TerminalParser(columns: 12, rows: 3)
+        parser.feed(Array("one\ntwo\nthree\nfour\nfive".utf8))
+        let bottomRows = parser.snapshot().cells.map { $0.map(\.text).joined() }
+
+        parser.scrollViewport(lines: 1)
+        let scrolled = parser.snapshot()
+        let scrolledRows = scrolled.cells.map { $0.map(\.text).joined() }
+
+        XCTAssertEqual(scrolled.scrollOffset, 1)
+        XCTAssertNotEqual(scrolledRows, bottomRows)
+        XCTAssertEqual(scrolledRows.dropFirst(), bottomRows.dropLast())
+    }
+
     @MainActor
     func testHostEffectsDrainWhileInactiveAndCmdClickOpeningIsTestable() throws {
         let root = try temporaryDirectory()
@@ -123,6 +212,106 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(session.exitStatus, 7)
         XCTAssertTrue(session.displayTitle.contains("exit 7"))
         XCTAssertTrue(session.snapshot.cells.flatMap { $0 }.map(\.text).joined().contains("hello"))
+    }
+
+    @MainActor
+    func testEOFDrainsTrailingOutputBeforeExitBecomesObservable() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(
+            rootURL: root,
+            command: ["/bin/sh", "-c", "printf 'trailing-output'; exit 19"]
+        )
+        defer { session.close() }
+        var callbackText = ""
+        session.onNaturalExit = { _ in callbackText = snapshotText(session) }
+
+        let deadline = Date().addingTimeInterval(3)
+        while (session.exitStatus == nil || !snapshotText(session).contains("trailing-output")),
+              Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+
+        XCTAssertEqual(session.exitStatus, 19)
+        XCTAssertTrue(snapshotText(session).contains("trailing-output"))
+        XCTAssertTrue(callbackText.contains("trailing-output"))
+    }
+
+    @MainActor
+    func testQuietChildDoesNotCreateOutputAndExplicitCloseDoesNotNotifyExit() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(
+            rootURL: root,
+            command: ["/bin/sh", "-c", "sleep 10"]
+        )
+        var naturalExitCount = 0
+        session.onNaturalExit = { _ in naturalExitCount += 1 }
+
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(session.processedOutputByteCount, 0)
+
+        let closeStarted = Date()
+        session.close()
+        XCTAssertLessThan(Date().timeIntervalSince(closeStarted), 2)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(naturalExitCount, 0)
+    }
+
+    @MainActor
+    func testSustainedOutputDoesNotStarveResizeOrExplicitClose() throws {
+        guard TerminalSession.usesGhosttyRenderer else {
+            return XCTFail("The configured DevHQ build must use libghostty")
+        }
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(
+            rootURL: root,
+            command: ["/bin/sh", "-c", "exec yes"]
+        )
+        var naturalExitCount = 0
+        session.onNaturalExit = { _ in naturalExitCount += 1 }
+        defer { session.close() }
+
+        let deadline = Date().addingTimeInterval(2)
+        while session.processedOutputByteCount == 0, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        XCTAssertGreaterThan(session.processedOutputByteCount, 0)
+
+        let resizeStarted = Date()
+        session.resize(columns: 100, rows: 30, pixelWidth: 0, pixelHeight: 0)
+        XCTAssertLessThan(Date().timeIntervalSince(resizeStarted), 2)
+        let closeStarted = Date()
+        session.close()
+        XCTAssertLessThan(Date().timeIntervalSince(closeStarted), 2)
+        XCTAssertEqual(naturalExitCount, 0)
+    }
+
+    @MainActor
+    func testParentExitIsNotBlockedByOutputtingPTYDescendant() throws {
+        guard TerminalSession.usesGhosttyRenderer else {
+            return XCTFail("The configured DevHQ build must use libghostty")
+        }
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The descendant ignores HUP so it retains the PTY after its shell exits.
+        // `close()` below must terminate the process group and prevent an orphan.
+        let session = try TerminalSession(
+            rootURL: root,
+            command: ["/bin/sh", "-c", "(trap '' HUP; exec yes) & exit 31"]
+        )
+        defer { session.close() }
+        var statuses: [Int] = []
+        session.onNaturalExit = { statuses.append($0) }
+
+        let deadline = Date().addingTimeInterval(2)
+        while statuses.isEmpty, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+
+        XCTAssertEqual(statuses, [31])
+        XCTAssertEqual(session.exitStatus, 31)
     }
 
     @MainActor
@@ -318,6 +507,41 @@ final class TerminalSessionTests: XCTestCase {
         session.send(text: "\n")
         awaitTitle("shifted-screen", in: session)
         XCTAssertEqual(snapshotRows(session), ["TWO", "THREE", "FOUR"])
+    }
+
+    @MainActor
+    func testNativePositiveScrollShowsOlderContentWithBottomRelativeOffset() throws {
+        guard TerminalSession.usesGhosttyRenderer else {
+            return XCTFail("The configured DevHQ build must use libghostty")
+        }
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try TerminalSession(
+            rootURL: root,
+            command: [
+                "/bin/sh", "-c",
+                "printf '\\033]2;scroll-ready\\007'; IFS= read -r _; "
+                    + "i=1; while [ $i -le 20 ]; do printf 'line%02d\\r\\n' $i; "
+                    + "i=$((i+1)); done; exec /bin/cat"
+            ]
+        )
+        defer { session.close() }
+
+        session.resize(columns: 12, rows: 3, pixelWidth: 0, pixelHeight: 0)
+        awaitTitle("scroll-ready", in: session)
+        session.send(text: "\n")
+        let deadline = Date().addingTimeInterval(3)
+        while (session.snapshot.scrollbackCount < 3 || !snapshotText(session).contains("line20")),
+              Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        let bottomRows = session.snapshot.cells
+
+        session.scroll(lines: 2)
+        let scrolled = session.snapshot
+        XCTAssertEqual(scrolled.scrollOffset, 2)
+        XCTAssertNotEqual(scrolled.cells, bottomRows)
+        XCTAssertEqual(scrolled.cells.dropFirst(2), bottomRows.dropLast(2))
     }
 
     @MainActor

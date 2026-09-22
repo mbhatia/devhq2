@@ -70,6 +70,10 @@ struct WorkspaceLayoutStateStore: WorkspaceLayoutPersisting {
         fileManager: FileManager = .default
     ) {
         self.configDirectory = configDirectory
+            ?? ProcessInfo.processInfo.environment["DEVHQ_CONFIG_DIR"].flatMap { path in
+                path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+            }
+                .map { $0.appendingPathComponent("ws", isDirectory: true) }
             ?? fileManager.homeDirectoryForCurrentUser
                 .appendingPathComponent(".config/devhq/ws", isDirectory: true)
         self.fileManager = fileManager

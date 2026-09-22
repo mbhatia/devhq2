@@ -9,6 +9,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <util.h>
+#include <pthread.h>
+#include <poll.h>
+#include <time.h>
 
 #ifdef DEVHQ_USE_GHOSTTY
 #include <ghostty/vt.h>
@@ -21,6 +24,9 @@ struct DevHQTerminal {
     bool exited;
     int exit_status;
 #ifdef DEVHQ_USE_GHOSTTY
+    pthread_mutex_t lock;
+#endif
+#ifdef DEVHQ_USE_GHOSTTY
     GhosttyTerminal ghostty;
     GhosttyRenderState render_state;
     GhosttyKeyEncoder key_encoder;
@@ -32,6 +38,22 @@ struct DevHQTerminal {
     bool has_size;
 #endif
 };
+
+#ifdef DEVHQ_USE_GHOSTTY
+// Scoped locking also covers early error returns. Closing requires the caller
+// to stop its reader first; a mutex cannot extend the lifetime of a C pointer.
+static GhosttyResult terminal_mode_get(GhosttyTerminal terminal, GhosttyMode mode, bool *value) {
+    GhosttyTerminalModeConfig config = {.mode = mode, .value = false};
+    GhosttyResult result = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config);
+    if (result == GHOSTTY_SUCCESS) *value = config.value;
+    return result;
+}
+
+static void unlock_terminal(pthread_mutex_t **lock) { if (*lock) pthread_mutex_unlock(*lock); }
+#define LOCK_TERMINAL(t) \
+    pthread_mutex_t *held_lock __attribute__((cleanup(unlock_terminal))) = &(t)->lock; \
+    pthread_mutex_lock(held_lock)
+#endif
 
 static struct winsize make_winsize(
     uint16_t columns, uint16_t rows, uint32_t pixel_width, uint32_t pixel_height) {
@@ -61,23 +83,30 @@ DevHQTerminal *devhq_terminal_create(
     DevHQTerminal *terminal = calloc(1, sizeof(*terminal));
     if (!terminal) return NULL;
 #ifdef DEVHQ_USE_GHOSTTY
-    GhosttyTerminalOptions options = {
-        .cols = columns,
-        .rows = rows,
-        .max_scrollback = 10000,
-    };
-    if (ghostty_terminal_new(NULL, &terminal->ghostty, options) != GHOSTTY_SUCCESS) {
+    if (pthread_mutex_init(&terminal->lock, NULL) != 0) { free(terminal); return NULL; }
+    if (ghostty_terminal_new(NULL, &terminal->ghostty, columns, rows) != GHOSTTY_SUCCESS) {
+        pthread_mutex_destroy(&terminal->lock);
         free(terminal);
         return NULL;
     }
+    // Retain the intended 10,000-row history, within Ghostty's native default
+    // memory budget. The former API misleadingly called its byte cap rows.
+    size_t scrollback_bytes = 50000000;
+    size_t scrollback_lines = 10000;
+    (void)ghostty_terminal_set(terminal->ghostty,
+        GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_bytes);
+    (void)ghostty_terminal_set(terminal->ghostty,
+        GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines);
     if (ghostty_render_state_new(NULL, &terminal->render_state) != GHOSTTY_SUCCESS) {
         ghostty_terminal_free(terminal->ghostty);
+        pthread_mutex_destroy(&terminal->lock);
         free(terminal);
         return NULL;
     }
     if (ghostty_key_encoder_new(NULL, &terminal->key_encoder) != GHOSTTY_SUCCESS) {
         ghostty_render_state_free(terminal->render_state);
         ghostty_terminal_free(terminal->ghostty);
+        pthread_mutex_destroy(&terminal->lock);
         free(terminal);
         return NULL;
     }
@@ -85,6 +114,7 @@ DevHQTerminal *devhq_terminal_create(
         ghostty_key_encoder_free(terminal->key_encoder);
         ghostty_render_state_free(terminal->render_state);
         ghostty_terminal_free(terminal->ghostty);
+        pthread_mutex_destroy(&terminal->lock);
         free(terminal);
         return NULL;
     }
@@ -97,6 +127,7 @@ DevHQTerminal *devhq_terminal_create(
         ghostty_key_encoder_free(terminal->key_encoder);
         ghostty_render_state_free(terminal->render_state);
         ghostty_terminal_free(terminal->ghostty);
+        pthread_mutex_destroy(&terminal->lock);
         free(terminal);
         return NULL;
     }
@@ -114,6 +145,7 @@ DevHQTerminal *devhq_terminal_create(
         ghostty_key_encoder_free(terminal->key_encoder);
         ghostty_render_state_free(terminal->render_state);
         ghostty_terminal_free(terminal->ghostty);
+        pthread_mutex_destroy(&terminal->lock);
 #endif
         free(terminal);
         return NULL;
@@ -187,21 +219,73 @@ void devhq_terminal_close(DevHQTerminal *terminal) {
         }
     }
 #ifdef DEVHQ_USE_GHOSTTY
+    pthread_mutex_lock(&terminal->lock);
     ghostty_mouse_encoder_free(terminal->mouse_encoder);
     ghostty_key_encoder_free(terminal->key_encoder);
     ghostty_render_state_free(terminal->render_state);
     ghostty_terminal_free(terminal->ghostty);
+    pthread_mutex_unlock(&terminal->lock);
+    pthread_mutex_destroy(&terminal->lock);
 #endif
     free(terminal);
 }
 
-ssize_t devhq_terminal_read(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
+ssize_t devhq_terminal_read_output(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
     if (!terminal || terminal->fd < 0 || !buffer || capacity == 0) return -1;
-    ssize_t count = read(terminal->fd, buffer, capacity);
+    ssize_t count;
+    do { count = read(terminal->fd, buffer, capacity); } while (count < 0 && errno == EINTR);
+    if (count == 0) return -1; // EOF; zero is reserved for would-block.
+    return count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : count;
+}
+
+ssize_t devhq_terminal_gather_output(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
+    size_t received = 0;
+    unsigned int retries = 0;
+    uint64_t bridge_start = 0;
+    while (received < capacity) {
+        ssize_t count = devhq_terminal_read_output(terminal, buffer + received, capacity - received);
+        if (count > 0) { received += (size_t)count; retries = 0; continue; }
+        if (count < 0) return received ? (ssize_t)received : -1;
+        // Match Ghostty's POSIX gather strategy (termio/Exec.zig): macOS PTYs
+        // cap reads at 1 KiB. Short bounded retries bridge a saturated writer's
+        // microsecond refill gaps rather than sleeping after every fragment.
+        // Interactive trickles never spin or wait for a full batch.
+        if (received < 1024) break;
+        if (retries++ < 16) continue;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint64_t nanoseconds = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+        if (bridge_start == 0) bridge_start = nanoseconds;
+        else if (nanoseconds - bridge_start >= 3000000ULL) break;
+        struct pollfd fd = {.fd = terminal->fd, .events = POLLIN};
+        int ready;
+        do { ready = poll(&fd, 1, 1); } while (ready < 0 && errno == EINTR);
+        if (ready <= 0) break;
+        retries = 0;
+    }
+    return (ssize_t)received;
+}
+
+size_t devhq_terminal_available_output(DevHQTerminal *terminal) {
+    int bytes = 0;
+    if (!terminal || ioctl(terminal->fd, FIONREAD, &bytes) != 0 || bytes < 0) return 0;
+    return (size_t)bytes;
+}
+
+void devhq_terminal_feed(DevHQTerminal *terminal, const uint8_t *buffer, size_t count) {
 #ifdef DEVHQ_USE_GHOSTTY
-    if (count > 0) ghostty_terminal_vt_write(terminal->ghostty, buffer, (size_t)count);
+    if (!terminal || !buffer || count == 0) return;
+    LOCK_TERMINAL(terminal);
+    ghostty_terminal_vt_write(terminal->ghostty, buffer, count);
+#else
+    (void)terminal; (void)buffer; (void)count;
 #endif
-    return count < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : count;
+}
+
+ssize_t devhq_terminal_read(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
+    ssize_t count = devhq_terminal_read_output(terminal, buffer, capacity);
+    if (count > 0) devhq_terminal_feed(terminal, buffer, (size_t)count);
+    return count;
 }
 
 ssize_t devhq_terminal_write(DevHQTerminal *terminal, const uint8_t *bytes, size_t count) {
@@ -225,6 +309,7 @@ bool devhq_terminal_resize(
     uint32_t pixel_height) {
     if (!terminal || terminal->fd < 0 || columns == 0 || rows == 0) return false;
 #ifdef DEVHQ_USE_GHOSTTY
+    LOCK_TERMINAL(terminal);
     // libghostty ends synchronized output on resize, so repeated layout passes must be no-ops.
     if (terminal->has_size && terminal->columns == columns && terminal->rows == rows &&
         terminal->pixel_width == pixel_width && terminal->pixel_height == pixel_height) {
@@ -255,6 +340,8 @@ pid_t devhq_terminal_pid(const DevHQTerminal *terminal) {
     return terminal ? terminal->pid : -1;
 }
 
+int devhq_terminal_fd(const DevHQTerminal *terminal) { return terminal ? terminal->fd : -1; }
+
 bool devhq_terminal_uses_ghostty(void) {
 #ifdef DEVHQ_USE_GHOSTTY
     return true;
@@ -281,6 +368,7 @@ bool devhq_terminal_key(DevHQTerminal *terminal, int key, uint16_t modifiers) {
     ghostty_key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS);
     ghostty_key_event_set_key(event, keys[key]);
     ghostty_key_event_set_mods(event, modifiers);
+    LOCK_TERMINAL(terminal);
     ghostty_key_encoder_setopt_from_terminal(terminal->key_encoder, terminal->ghostty);
     GhosttyOptionAsAlt alt = GHOSTTY_OPTION_AS_ALT_TRUE;
     ghostty_key_encoder_setopt(
@@ -291,6 +379,7 @@ bool devhq_terminal_key(DevHQTerminal *terminal, int key, uint16_t modifiers) {
         terminal->key_encoder, event, output, sizeof(output), &written);
     ghostty_key_event_free(event);
     if (result != GHOSTTY_SUCCESS) return false;
+    pthread_mutex_unlock(held_lock); held_lock = NULL;
     return devhq_terminal_write(terminal, (const uint8_t *)output, written) >= 0;
 #endif
 }
@@ -301,8 +390,10 @@ bool devhq_terminal_paste(DevHQTerminal *terminal, const char *text, size_t coun
     return false;
 #else
     if (!terminal || !text) return false;
+    LOCK_TERMINAL(terminal);
     bool bracketed = false;
-    (void)ghostty_terminal_mode_get(terminal->ghostty, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed);
+    (void)terminal_mode_get(terminal->ghostty, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed);
+    pthread_mutex_unlock(held_lock); held_lock = NULL;
     char *input = malloc(count);
     if (!input) return false;
     memcpy(input, text, count);
@@ -331,14 +422,16 @@ bool devhq_terminal_focus(DevHQTerminal *terminal, bool focused) {
     return false;
 #else
     if (!terminal) return false;
+    LOCK_TERMINAL(terminal);
     bool reporting = false;
-    if (ghostty_terminal_mode_get(
+    if (terminal_mode_get(
             terminal->ghostty, GHOSTTY_MODE_FOCUS_EVENT, &reporting) != GHOSTTY_SUCCESS ||
         !reporting) return true;
     char output[8];
     size_t written = 0;
     if (ghostty_focus_encode(focused ? GHOSTTY_FOCUS_GAINED : GHOSTTY_FOCUS_LOST,
             output, sizeof(output), &written) != GHOSTTY_SUCCESS) return false;
+    pthread_mutex_unlock(held_lock); held_lock = NULL;
     return devhq_terminal_write(terminal, (const uint8_t *)output, written) >= 0;
 #endif
 }
@@ -362,6 +455,7 @@ bool devhq_terminal_mouse(
     else ghostty_mouse_event_clear_button(event);
     ghostty_mouse_event_set_mods(event, modifiers);
     ghostty_mouse_event_set_position(event, (GhosttyMousePosition){.x = x, .y = y});
+    LOCK_TERMINAL(terminal);
     ghostty_mouse_encoder_setopt_from_terminal(terminal->mouse_encoder, terminal->ghostty);
     char output[128];
     size_t written = 0;
@@ -369,6 +463,7 @@ bool devhq_terminal_mouse(
         terminal->mouse_encoder, event, output, sizeof(output), &written);
     ghostty_mouse_event_free(event);
     if (result != GHOSTTY_SUCCESS || written == 0) return false;
+    pthread_mutex_unlock(held_lock); held_lock = NULL;
     return devhq_terminal_write(terminal, (const uint8_t *)output, written) >= 0;
 #endif
 }
@@ -383,8 +478,12 @@ bool devhq_terminal_snapshot(
     return false;
 #else
     if (!terminal || !cells || !snapshot) return false;
+    // The caller supplies a fresh, zero-initialized snapshot. Initialize it
+    // before acquiring Ghostty state so every failure leaves no owned memory.
+    memset(snapshot, 0, sizeof(*snapshot));
+    LOCK_TERMINAL(terminal);
     bool synchronized = false;
-    if (ghostty_terminal_mode_get(
+    if (terminal_mode_get(
             terminal->ghostty, GHOSTTY_MODE_SYNC_OUTPUT, &synchronized) != GHOSTTY_SUCCESS) {
         return false;
     }
@@ -398,9 +497,8 @@ bool devhq_terminal_snapshot(
             terminal->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
         ghostty_render_state_get(
             terminal->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows) != GHOSTTY_SUCCESS ||
-        capacity < (size_t)columns * rows) return false;
+        capacity < (size_t)columns * rows) { return false; }
     memset(cells, 0, sizeof(*cells) * (size_t)columns * rows);
-    memset(snapshot, 0, sizeof(*snapshot));
     snapshot->columns = columns;
     snapshot->rows = rows;
     (void)ghostty_render_state_get(terminal->render_state,
@@ -417,6 +515,16 @@ bool devhq_terminal_snapshot(
         GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE, &cursor_style);
     snapshot->cursor_style = cursor_style == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR ? 1 :
         (cursor_style == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE ? 2 : 0);
+    (void)ghostty_terminal_get(terminal->ghostty,
+        GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, &snapshot->scrollback_rows);
+    GhosttyTerminalScrollbar scrollbar = {0};
+    if (ghostty_terminal_get(terminal->ghostty,
+            GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar) == GHOSTTY_SUCCESS) {
+        snapshot->scrollback_rows = scrollbar.total > scrollbar.len
+            ? (size_t)(scrollbar.total - scrollbar.len) : 0;
+        snapshot->scroll_offset = snapshot->scrollback_rows > scrollbar.offset
+            ? snapshot->scrollback_rows - (size_t)scrollbar.offset : 0;
+    }
 
     GhosttyRenderStateRowIterator iterator = NULL;
     GhosttyRenderStateRowCells row_cells = NULL;
@@ -424,6 +532,7 @@ bool devhq_terminal_snapshot(
         ghostty_render_state_row_cells_new(NULL, &row_cells) != GHOSTTY_SUCCESS) goto fail;
     if (ghostty_render_state_get(terminal->render_state,
             GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &iterator) != GHOSTTY_SUCCESS) goto fail;
+    size_t grapheme_capacity = 0;
     size_t y = 0;
     while (y < rows && ghostty_render_state_row_iterator_next(iterator)) {
         if (ghostty_render_state_row_get(iterator,
@@ -434,16 +543,29 @@ bool devhq_terminal_snapshot(
             uint32_t length = 0;
             (void)ghostty_render_state_row_cells_get(row_cells,
                 GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &length);
+            if (snapshot->grapheme_count > UINT32_MAX ||
+                length > UINT32_MAX - snapshot->grapheme_count) goto fail;
+            output->grapheme_offset = (uint32_t)snapshot->grapheme_count;
+            output->grapheme_length = length;
             if (length > 0) {
-                uint32_t copied = length > 8 ? 8 : length;
-                uint32_t stack_codepoints[8] = {0};
-                uint32_t *codepoints = length > 8 ? calloc(length, sizeof(uint32_t)) : stack_codepoints;
-                if (!codepoints) goto fail;
-                (void)ghostty_render_state_row_cells_get(row_cells,
-                    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, codepoints);
-                memcpy(&output->codepoint0, codepoints, copied * sizeof(uint32_t));
-                output->codepoint_count = (uint8_t)copied;
-                if (codepoints != stack_codepoints) free(codepoints);
+                size_t needed = snapshot->grapheme_count + length;
+                if (needed > grapheme_capacity) {
+                    size_t capacity = grapheme_capacity ? grapheme_capacity : 256;
+                    while (capacity < needed) {
+                        if (capacity > SIZE_MAX / 2) { capacity = needed; break; }
+                        capacity *= 2;
+                    }
+                    if (capacity > SIZE_MAX / sizeof(*snapshot->graphemes)) goto fail;
+                    uint32_t *graphemes = realloc(
+                        snapshot->graphemes, capacity * sizeof(*snapshot->graphemes));
+                    if (!graphemes) goto fail;
+                    snapshot->graphemes = graphemes;
+                    grapheme_capacity = capacity;
+                }
+                if (ghostty_render_state_row_cells_get(row_cells,
+                        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+                        snapshot->graphemes + snapshot->grapheme_count) != GHOSTTY_SUCCESS) goto fail;
+                snapshot->grapheme_count = needed;
             }
             GhosttyCell raw = 0;
             GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
@@ -489,7 +611,67 @@ bool devhq_terminal_snapshot(
 fail:
     ghostty_render_state_row_cells_free(row_cells);
     ghostty_render_state_row_iterator_free(iterator);
+    devhq_terminal_snapshot_free(snapshot);
     return false;
+#endif
+}
+
+void devhq_terminal_snapshot_free(DevHQTerminalSnapshot *snapshot) {
+    if (!snapshot) return;
+    free(snapshot->graphemes);
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
+#ifdef DEVHQ_USE_GHOSTTY
+static size_t terminal_string(
+    DevHQTerminal *terminal,
+    GhosttyTerminalData data,
+    uint8_t *buffer,
+    size_t capacity) {
+    if (!terminal) return 0;
+    LOCK_TERMINAL(terminal);
+    GhosttyString value = {0};
+    if (ghostty_terminal_get(terminal->ghostty, data, &value) != GHOSTTY_SUCCESS) return 0;
+    if (!buffer || capacity < value.len) return value.len;
+    memcpy(buffer, value.ptr, value.len);
+    return value.len;
+}
+#endif
+
+size_t devhq_terminal_title(DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
+#ifndef DEVHQ_USE_GHOSTTY
+    (void)terminal; (void)buffer; (void)capacity;
+    return 0;
+#else
+    return terminal_string(terminal, GHOSTTY_TERMINAL_DATA_TITLE, buffer, capacity);
+#endif
+}
+
+size_t devhq_terminal_working_directory(
+    DevHQTerminal *terminal, uint8_t *buffer, size_t capacity) {
+#ifndef DEVHQ_USE_GHOSTTY
+    (void)terminal; (void)buffer; (void)capacity;
+    return 0;
+#else
+    return terminal_string(terminal, GHOSTTY_TERMINAL_DATA_PWD, buffer, capacity);
+#endif
+}
+
+bool devhq_terminal_scroll(DevHQTerminal *terminal, intptr_t lines) {
+#ifndef DEVHQ_USE_GHOSTTY
+    (void)terminal; (void)lines;
+    return false;
+#else
+    if (!terminal) return false;
+    LOCK_TERMINAL(terminal);
+    GhosttyTerminalScrollViewport behavior = {
+        .tag = GHOSTTY_SCROLL_VIEWPORT_DELTA,
+        // Ghostty's viewport delta is negative for older rows. DevHQ exposes
+        // positive values for scroll-up.
+        .value.delta = -lines,
+    };
+    ghostty_terminal_scroll_viewport(terminal->ghostty, behavior);
+    return true;
 #endif
 }
 
@@ -504,6 +686,7 @@ size_t devhq_terminal_hyperlink_at(
     return 0;
 #else
     if (!terminal) return 0;
+    LOCK_TERMINAL(terminal);
     GhosttyPoint point = {0};
     point.tag = GHOSTTY_POINT_TAG_VIEWPORT;
     point.value.coordinate.x = column;
