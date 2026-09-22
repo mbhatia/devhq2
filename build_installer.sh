@@ -218,6 +218,14 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 PLIST
 plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
 
+# Exercise resource lookup from a relocated app bundle. File-presence checks
+# above cannot catch a SwiftPM Bundle.module fallback to the build directory.
+RELOCATED_APP="$WORK_DIR/relocated/DevHQ Relocated.app"
+mkdir -p "$(dirname "$RELOCATED_APP")"
+ditto "$APP_BUNDLE" "$RELOCATED_APP"
+log "Verifying terminal resources from relocated app..."
+"$RELOCATED_APP/Contents/MacOS/DevHQ" --verify-bundled-resources
+
 codesign_path() {
   local path="$1"
   local args=(--force)

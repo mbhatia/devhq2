@@ -6,9 +6,16 @@ import CoreText
 /// symbols available when a user has not installed a patched font locally.
 enum TerminalFont {
     private static let nerdSymbolsPostscriptName = "SymbolsNF"
+    private static let bundledFonts = [
+        (resourceName: "JetBrainsMono-Regular", postscriptName: "JetBrainsMono-Regular"),
+        (resourceName: "JetBrainsMono-Bold", postscriptName: "JetBrainsMono-Bold"),
+        (resourceName: "JetBrainsMono-Italic", postscriptName: "JetBrainsMono-Italic"),
+        (resourceName: "JetBrainsMono-BoldItalic", postscriptName: "JetBrainsMono-BoldItalic"),
+        (resourceName: "SymbolsNerdFont-Regular", postscriptName: nerdSymbolsPostscriptName)
+    ]
 
     static func bundledFontURL(named name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
+        DevHQResourceBundle.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
     }
 
     static func regular(named name: String, size: CGFloat) -> NSFont {
@@ -61,6 +68,34 @@ enum TerminalFont {
         return CTFontGetGlyphsForCharacters(font as CTFont, &characters, &glyphs, characters.count)
     }
 
+    /// Registers every terminal font and returns their resolved on-disk URLs.
+    /// Used by the packaged-app resource probe before the UI starts.
+    static func verifiedBundledFontURLs(in resourceBundle: Bundle) -> [URL]? {
+        _ = registerBundledFonts
+        var resolvedURLs: [URL] = []
+        for font in bundledFonts {
+            guard let expectedURL = resourceBundle.url(
+                forResource: font.resourceName,
+                withExtension: "ttf",
+                subdirectory: "Fonts"
+            ),
+            let resolvedURL = bundledFontURL(named: font.resourceName),
+            resolvedURL.standardizedFileURL == expectedURL.standardizedFileURL else {
+                return nil
+            }
+            guard let registeredFont = NSFont(name: font.postscriptName, size: 13),
+                  let actualURL = CTFontCopyAttribute(
+                    registeredFont as CTFont,
+                    kCTFontURLAttribute
+                  ) as? URL,
+                  actualURL.standardizedFileURL == expectedURL.standardizedFileURL else {
+                return nil
+            }
+            resolvedURLs.append(actualURL)
+        }
+        return resolvedURLs
+    }
+
     private static func bundled(
         _ postscriptName: String,
         size: CGFloat,
@@ -78,14 +113,8 @@ enum TerminalFont {
     }
 
     private static let registerBundledFonts: Void = {
-        for resource in [
-            "JetBrainsMono-Regular",
-            "JetBrainsMono-Bold",
-            "JetBrainsMono-Italic",
-            "JetBrainsMono-BoldItalic",
-            "SymbolsNerdFont-Regular"
-        ] {
-            guard let url = bundledFontURL(named: resource) else { continue }
+        for font in bundledFonts {
+            guard let url = bundledFontURL(named: font.resourceName) else { continue }
             CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
         }
     }()

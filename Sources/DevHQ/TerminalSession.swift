@@ -176,11 +176,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         self.hostServices = hostServices ?? SystemTerminalHostServices.shared
         self.parser = TerminalParser(columns: 80, rows: 24, tracksCells: !Self.usesGhosttyRenderer)
         let shell = shell ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let packagedResourceBundleURL = Bundle.main.resourceURL?
-            .appendingPathComponent("DevHQ_DevHQ.bundle", isDirectory: true)
-        let resourceBundle = packagedResourceBundleURL.flatMap { Bundle(url: $0) } ?? Bundle.module
-        let terminfo = resourceBundle.resourceURL?
-            .appendingPathComponent("terminfo", isDirectory: true).path
+        let terminfo = DevHQResourceBundle.directoryURL(named: "terminfo")?.path
         let argumentPointers = command?.map { strdup($0) } ?? []
         defer { argumentPointers.forEach { free($0) } }
         guard !argumentPointers.contains(where: { $0 == nil }) else {
