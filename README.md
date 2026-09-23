@@ -44,6 +44,77 @@ Lua modules below the configuration directory can be loaded normally. For exampl
 [`Examples/init.lua`](Examples/init.lua) for a complete starter file. Restart DevHQ
 after editing Lua configuration; live plugin reload is not implemented yet.
 
+### Key bindings
+
+Configure command shortcuts in `~/.config/devhq/init.lua` with the `keymap`
+module:
+
+```lua
+local keymap = require "keymap"
+
+keymap.add {
+  ["cmd+option+t"] = "terminal:toggle-drawer",
+}
+```
+
+The same table is available as `(require "devhq").keymap`; there is no
+`core.keymap` module.
+
+Shortcut strings use modifier names and a key joined by `+`, such as
+`cmd+shift+p` or `ctrl+shift+\``. `option` is also accepted for the Option key.
+The accepted modifier aliases are `cmd`/`command`, `ctrl`/`control`,
+`option`/`opt`/`alt`, and `shift`. A binding requires at least one modifier;
+the key may be an unshifted printable key, navigation key, Return, Tab, Space,
+Escape, Delete, or function key. For shifted punctuation, use the base key with
+`shift`: for example, `cmd+shift+1`, `cmd+shift+/`, or `cmd+shift+=`, rather
+than `!`, `?`, or `+`.
+Bindings target command IDs, not menu item titles. The command palette shows a
+configured shortcut on the right side of its command row.
+
+Default bindings are **⌘⇧O** Open Folder, **⌘S** Save, **⌃⇧`** New Terminal,
+**⌘W** Close Terminal, **⌥T** Toggle Terminal Drawer, and **⌘⇧P** Command
+Palette.
+
+You can bind a Lua command after registering it:
+
+```lua
+local command = require "command"
+local keymap = require "keymap"
+
+command.add("user:toggle-theme", nil, function()
+  devhq.window.theme = devhq.window.theme == "dark" and "light" or "dark"
+end)
+
+keymap.add {
+  ["cmd+option+d"] = "user:toggle-theme",
+}
+```
+
+Command IDs use lowercase `namespace:name` names. Built-in examples include
+`terminal:toggle-drawer` and `devhq:toggle-sidebar`; use the command palette to
+discover commands available in the current view. A configured shortcut is routed
+before terminal input only when its command is available in the current context.
+Unbound, unavailable, or out-of-scope shortcuts continue to the terminal or
+focused control. Configured bindings also apply while a text input has focus.
+While the command palette is open, its own keyboard controls handle navigation,
+Escape, and Return instead of the keybinding router.
+
+Each shortcut belongs to one command, but a command may have multiple shortcuts.
+`keymap.add` rejects a shortcut already assigned to a different command by
+default; pass `true` as its second argument to assign that shortcut to the new
+command:
+
+```lua
+keymap.add({ ["cmd+shift+p"] = "terminal:toggle-drawer" }, true)
+```
+
+Each `keymap.add` call validates its complete mapping before making changes. The
+palette displays all configured labels for a command, in deterministic order.
+
+This uses a Lite XL-shaped Lua configuration style, but is not a promise of
+Lite XL API compatibility. Key bindings currently invoke existing commands only:
+they do not support Lua actions directly or unmodified keys.
+
 ### Extending the Lua API
 
 The Swift-facing plugin API uses compile-time macros. Add a module table with

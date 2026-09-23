@@ -33,6 +33,7 @@ struct ContentView: View {
     @ObservedObject var commandManager: CommandManager
     @ObservedObject var commandPalette: CommandPaletteController
     @ObservedObject var commandContext: CommandContextTracker
+    let keyBindingRouter: KeyBindingRouter
     @ObservedObject var contextMenuRegistry: ContextMenuRegistry
     @ObservedObject var terminalDrawer = TerminalDrawerModel()
     @ObservedObject var sidebarVisibility = SidebarVisibilityModel()
@@ -63,12 +64,7 @@ struct ContentView: View {
                                     fileExplorerWidth: layout.fileExplorerWidth,
                                     requestID: layoutRestorationRequestID
                                 ) {
-                                    if tracksLayoutChanges,
-                                       abs(settings.treeViewSize - layout.fileExplorerWidth)
-                                        >= WorkspaceLayoutModel.widthUpdateTolerance {
-                                        settings.treeViewSize = layout.fileExplorerWidth
-                                    }
-                                    hasRestoredLayout = true
+                                    restoreFileExplorerWidth()
                                 }
 
                                 PaneWidthObserver { width in
@@ -97,14 +93,7 @@ struct ContentView: View {
                         )
                         .background {
                             ZStack {
-                                PaneWidthObserver { width in
-                                    guard tracksLayoutChanges, hasRestoredLayout else { return }
-                                    layout.updateFileExplorerWidth(width)
-                                    if abs(settings.treeViewSize - layout.fileExplorerWidth)
-                                        >= WorkspaceLayoutModel.widthUpdateTolerance {
-                                        settings.treeViewSize = layout.fileExplorerWidth
-                                    }
-                                }
+                                PaneWidthObserver(onChange: updateFileExplorerWidth)
 
                                 PaneActivationMonitor(
                                     isEnabled: !commandPalette.isPresented
@@ -147,6 +136,12 @@ struct ContentView: View {
             }
 
             CommandPalette(controller: commandPalette)
+
+            KeyBindingRoutingMonitor(
+                router: keyBindingRouter,
+                isEnabled: !commandPalette.isPresented
+            )
+                .frame(width: 0, height: 0)
         }
         .font(uiFont)
         .preferredColorScheme(settings.windowTheme.colorScheme)
@@ -221,6 +216,25 @@ struct ContentView: View {
                     ?? "Unknown error"
             )
         }
+    }
+
+    private func restoreFileExplorerWidth() {
+        let fileExplorerWidth = layout.fileExplorerWidth
+        if tracksLayoutChanges,
+           abs(settings.treeViewSize - fileExplorerWidth)
+            >= WorkspaceLayoutModel.widthUpdateTolerance {
+            settings.treeViewSize = fileExplorerWidth
+        }
+        hasRestoredLayout = true
+    }
+
+    private func updateFileExplorerWidth(_ width: Double) {
+        guard tracksLayoutChanges, hasRestoredLayout else { return }
+        layout.updateFileExplorerWidth(width)
+        let fileExplorerWidth = layout.fileExplorerWidth
+        guard abs(settings.treeViewSize - fileExplorerWidth)
+            >= WorkspaceLayoutModel.widthUpdateTolerance else { return }
+        settings.treeViewSize = fileExplorerWidth
     }
 
     private var initialCommandView: CommandViewKind {

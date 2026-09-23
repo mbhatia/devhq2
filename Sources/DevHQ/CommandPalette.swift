@@ -15,9 +15,11 @@ final class CommandPaletteController: ObservableObject {
     private(set) var presentedContext: CommandContext?
     private(set) var commands: [RegisteredCommand] = []
     private let commandManager: CommandManager
+    private let bindings: KeyBindingRegistry
 
-    init(commandManager: CommandManager) {
+    init(commandManager: CommandManager, bindings: KeyBindingRegistry? = nil) {
         self.commandManager = commandManager
+        self.bindings = bindings ?? .shared
     }
 
     var filteredCommands: [RegisteredCommand] {
@@ -63,6 +65,10 @@ final class CommandPaletteController: ObservableObject {
         guard let selectedCommandID,
               filteredCommands.contains(where: { $0.id == selectedCommandID }) else { return }
         execute(commandID: selectedCommandID)
+    }
+
+    func shortcutLabel(for command: RegisteredCommand) -> String? {
+        bindings.displayLabel(for: command.id)
     }
 
     func execute(_ command: RegisteredCommand) {
@@ -191,6 +197,12 @@ private struct CommandPaletteCard: View {
                                         Text(command.title)
                                             .lineLimit(1)
                                         Spacer(minLength: 12)
+                                        if let shortcut = controller.shortcutLabel(for: command) {
+                                            Text(shortcut)
+                                                .font(.ui(.caption1))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
                                     }
                                     .padding(.horizontal, 12)
                                     .frame(height: 34)
