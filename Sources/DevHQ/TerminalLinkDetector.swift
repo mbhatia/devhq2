@@ -33,7 +33,8 @@ enum TerminalLinkDetector {
         (.path, regex(#"[\w./~-]+:[0-9]+:[0-9]+"#)),
         (.path, regex(#"[\w./~-]+:[0-9]+"#)),
         (.path, regex(#"/[\w./-]+"#)),
-        (.path, regex(#"[\w.-]+/[\w./-]+"#))
+        (.path, regex(#"[\w.-]+/[\w./-]+"#)),
+        (.path, regex(#"[\w~-]+(?:\.[\w-]+)+"#))
     ]
 
     private static let lineColumnSuffixExpression = regex(#"^(.+):([0-9]+):([0-9]+)$"#)
@@ -180,30 +181,44 @@ enum TerminalLinkRouter {
     ) -> TerminalLinkRoute {
         switch match.kind {
         case .path, .fileURL:
-            guard let path = TerminalLinkDetector.resolveFilePath(
+            guard let path = resolvedExistingFile(
                 match.target,
                 currentDirectory: currentDirectory,
-                workspaceRoot: workspaceRoot
-            ), isFile(path) else { return .unhandled }
-            if configuration.openHTMLFiles, isHTMLFile(path) {
-                return .webview(target: path)
-            }
+                workspaceRoot: workspaceRoot,
+                isFile: isFile
+            ) else { return .unhandled }
             return .editor(path: path, line: match.line, column: match.column)
         case .url:
-            guard let url = URL(string: match.target), url.scheme != nil else {
+            guard let url = URL(string: match.target),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 return .unhandled
             }
-            if isLocalhostURL(match.target) {
-                return configuration.openLocalhostURLs
-                    ? .webview(target: match.target)
-                    : .system(url)
-            }
-            return switch configuration.publicURLAction {
-            case .webview: .webview(target: match.target)
-            case .system: .system(url)
-            case .prompt: .prompt(url)
-            }
+            return .prompt(url)
         }
+    }
+
+    private static func resolvedExistingFile(
+        _ target: String,
+        currentDirectory: String?,
+        workspaceRoot: String?,
+        isFile: (String) -> Bool
+    ) -> String? {
+        guard !target.isEmpty else { return nil }
+        let decoded = target.hasPrefix("file://")
+            ? (String(target.dropFirst("file://".count)).removingPercentEncoding ?? String(target.dropFirst("file://".count)))
+            : target
+        if decoded.hasPrefix("/") || decoded.hasPrefix("~") {
+            guard let path = TerminalLinkDetector.resolveFilePath(
+                target, currentDirectory: nil, workspaceRoot: nil
+            ), isFile(path) else { return nil }
+            return path
+        }
+        let directories = [currentDirectory, workspaceRoot].compactMap { $0 }.filter { !$0.isEmpty }
+        for directory in directories {
+            let path = directory + "/" + decoded
+            if isFile(path) { return path }
+        }
+        return nil
     }
 
     static func isHTMLFile(_ path: String) -> Bool {

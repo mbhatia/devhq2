@@ -192,6 +192,68 @@ final class TerminalSessionTests: XCTestCase {
         }
         XCTAssertTrue(opened)
         XCTAssertEqual(host.openedURLs, [URL(string: "https://example.com")!])
+
+        var routed: TerminalLinkMatch?
+        TerminalSession.detectedLinkHandler = { match, _, _ in
+            routed = match
+            return true
+        }
+        defer { TerminalSession.detectedLinkHandler = nil }
+        var routedLink = false
+        for row in 0..<session.snapshot.rows where !routedLink {
+            for column in 0..<session.snapshot.columns where !routedLink {
+                routedLink = session.openLink(at: (column, row))
+            }
+        }
+        XCTAssertTrue(routedLink)
+        XCTAssertEqual(routed?.kind, .url)
+        XCTAssertTrue(routed?.target.hasPrefix("https://example.com") ?? false)
+        XCTAssertEqual(host.openedURLs, [URL(string: "https://example.com")!])
+    }
+
+    @MainActor
+    func testRelativeLinkUsesShellCurrentDirectoryAfterCD() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = root.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try "let value = 1\n".write(
+            to: child.appendingPathComponent("main.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let session = try TerminalSession(rootURL: root, shell: "/bin/sh")
+        defer { session.close() }
+        session.send(text: "cd \"\(child.path)\"; printf 'main.swift\\n'; sleep 1\n")
+
+        let deadline = Date().addingTimeInterval(3)
+        while !session.visibleText.contains("main.swift"), Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+        XCTAssertTrue(session.visibleText.contains("main.swift"))
+        // `visibleText` includes the PTY's immediate input echo. Wait for the
+        // shell to execute `cd` before sampling its process directory.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(session.currentDirectory, root)
+
+        var routedDirectory: URL?
+        TerminalSession.detectedLinkHandler = { match, directory, _ in
+            guard match.kind == .path, match.target == "main.swift" else { return false }
+            routedDirectory = directory
+            return true
+        }
+        defer { TerminalSession.detectedLinkHandler = nil }
+
+        var opened = false
+        for row in 0..<session.snapshot.rows where !opened {
+            for column in 0..<session.snapshot.columns where !opened {
+                opened = session.openLink(at: (column, row))
+            }
+        }
+        XCTAssertTrue(opened)
+        XCTAssertEqual(routedDirectory, child.standardizedFileURL)
+        XCTAssertEqual(session.currentDirectory, child.standardizedFileURL)
     }
 
     @MainActor

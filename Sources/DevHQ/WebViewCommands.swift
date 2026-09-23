@@ -267,7 +267,7 @@ func installTerminalLinkRouting(
             }
             return true
         case let .webview(target):
-            openSharedWebTarget(target, in: workspace, configuration: configuration)
+            openWebTab(target, in: workspace, configuration: configuration)
             return true
         case let .system(url):
             openSystemURL(url)
@@ -275,7 +275,7 @@ func installTerminalLinkRouting(
         case let .prompt(url):
             switch prompts.publicURLChoice(url) {
             case .webview:
-                openSharedWebTarget(
+                openWebTab(
                     url.absoluteString,
                     in: workspace,
                     configuration: configuration

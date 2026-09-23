@@ -296,7 +296,28 @@ final class WebViewCommandsTests: XCTestCase {
     }
 
     @MainActor
-    func testInstalledHandlerRoutesURLsPerConfiguration() throws {
+    func testInstalledHandlerRoutesAbsoluteFileTargetIntoEditor() throws {
+        let workspace = WorkspaceModel(arguments: ["DevHQ"])
+        let settings = EditorSettings()
+        let root = try temporaryDirectory()
+        workspace.openWorkspace(root)
+        let file = root.appendingPathComponent("absolute.swift")
+        try "let absolute = true\n".write(to: file, atomically: true, encoding: .utf8)
+        installTerminalLinkRouting(
+            workspace: workspace,
+            settings: settings,
+            prompts: prompts(),
+            openSystemURL: { _ in XCTFail("File targets must not open a browser") }
+        )
+        let handler = try XCTUnwrap(TerminalSession.detectedLinkHandler)
+
+        let match = TerminalLinkMatch(kind: .path, target: file.path, raw: file.path)
+        XCTAssertTrue(handler(match, root, root))
+        XCTAssertEqual(workspace.selectedDocument?.url, file.standardizedFileURL)
+    }
+
+    @MainActor
+    func testInstalledHandlerPromptsForURLsRegardlessOfConfiguration() throws {
         let workspace = WorkspaceModel(arguments: ["DevHQ"])
         let settings = EditorSettings()
         let root = try temporaryDirectory()
@@ -311,15 +332,21 @@ final class WebViewCommandsTests: XCTestCase {
         )
         let handler = try XCTUnwrap(TerminalSession.detectedLinkHandler)
 
-        // Localhost URLs go to the shared webview by default.
+        // Every terminal URL asks whether to use a fresh IDE tab or the system browser.
         let localhost = TerminalLinkMatch(
             kind: .url,
             target: "http://localhost:3000",
             raw: "http://localhost:3000"
         )
         XCTAssertTrue(handler(localhost, root, root))
-        XCTAssertEqual(workspace.sharedWebTab?.urlString, "http://localhost:3000")
-        XCTAssertTrue(openedSystemURLs.isEmpty)
+        XCTAssertEqual(openedSystemURLs.map(\.absoluteString), ["http://localhost:3000"])
+
+        settings.webView.openLocalhostURLs = false
+        XCTAssertTrue(handler(localhost, root, root))
+        XCTAssertEqual(
+            openedSystemURLs.map(\.absoluteString),
+            ["http://localhost:3000", "http://localhost:3000"]
+        )
 
         // Public URLs prompt by default; the "system browser" choice opens externally.
         let publicMatch = TerminalLinkMatch(
@@ -328,28 +355,30 @@ final class WebViewCommandsTests: XCTestCase {
             raw: "https://example.com"
         )
         XCTAssertTrue(handler(publicMatch, root, root))
-        XCTAssertEqual(openedSystemURLs.map(\.absoluteString), ["https://example.com"])
+        XCTAssertEqual(
+            openedSystemURLs.map(\.absoluteString),
+            ["http://localhost:3000", "http://localhost:3000", "https://example.com"]
+        )
 
-        // The "local webview" choice navigates the shared tab instead.
+        // The "local webview" choice opens a fresh, non-shared editor tab.
         choice = .webview
         XCTAssertTrue(handler(publicMatch, root, root))
-        XCTAssertEqual(workspace.sharedWebTab?.urlString, "https://example.com")
-        XCTAssertEqual(openedSystemURLs.count, 1)
+        XCTAssertEqual(workspace.selectedWebTab?.urlString, "https://example.com")
+        XCTAssertFalse(workspace.selectedWebTab?.isShared ?? true)
+        XCTAssertEqual(openedSystemURLs.count, 3)
 
-        // Config can bypass the prompt entirely.
+        // Config does not bypass the terminal's explicit destination choice.
         settings.webView.publicURLAction = .system
         XCTAssertTrue(handler(publicMatch, root, root))
-        XCTAssertEqual(openedSystemURLs.count, 2)
+        XCTAssertEqual(workspace.tabs.compactMap(\.web).count, 2)
+        XCTAssertEqual(openedSystemURLs.count, 3)
 
-        // HTML file targets go to the shared webview when enabled.
+        // HTML file targets remain editor documents.
         let page = root.appendingPathComponent("index.html")
         try "<p>hello</p>".write(to: page, atomically: true, encoding: .utf8)
         let htmlMatch = TerminalLinkMatch(kind: .path, target: "index.html", raw: "index.html")
         XCTAssertTrue(handler(htmlMatch, root, root))
-        XCTAssertEqual(
-            workspace.sharedWebTab?.urlString,
-            "file://" + WebTargetNormalizer.percentEncodedPath(page.path)
-        )
+        XCTAssertEqual(workspace.selectedDocument?.url, page.standardizedFileURL)
 
         settings.webView.openHTMLFiles = false
         XCTAssertTrue(handler(htmlMatch, root, root))

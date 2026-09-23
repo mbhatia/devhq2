@@ -85,6 +85,10 @@ final class TerminalLinkDetectorTests: XCTestCase {
         let relative = try XCTUnwrap(detect("open docs/index.html now", at: "docs/index.html"))
         XCTAssertEqual(relative.kind, .path)
         XCTAssertEqual(relative.target, "docs/index.html")
+
+        let bare = try XCTUnwrap(detect("compile main.swift now", at: "main.swift"))
+        XCTAssertEqual(bare.kind, .path)
+        XCTAssertEqual(bare.target, "main.swift")
     }
 
     func testURLKindKeepsPortLikeSuffixes() throws {
@@ -181,11 +185,11 @@ final class TerminalLinkDetectorTests: XCTestCase {
 
     // MARK: - Routing
 
-    func testExistingHTMLFileRoutesToWebviewWhenEnabled() {
+    func testExistingHTMLFileRoutesToEditorWhenEnabled() {
         let match = TerminalLinkMatch(kind: .path, target: "docs/index.html", raw: "docs/index.html")
         XCTAssertEqual(
             route(match, isFile: { $0 == "/cwd/docs/index.html" }),
-            .webview(target: "/cwd/docs/index.html")
+            .editor(path: "/cwd/docs/index.html", line: nil, column: nil)
         )
     }
 
@@ -196,6 +200,14 @@ final class TerminalLinkDetectorTests: XCTestCase {
         XCTAssertEqual(
             route(match, configuration: configuration, isFile: { _ in true }),
             .editor(path: "/cwd/docs/index.html", line: nil, column: nil)
+        )
+    }
+
+    func testRelativeFileFallsBackToWorkspaceWhenAbsentFromShellDirectory() {
+        let match = TerminalLinkMatch(kind: .path, target: "main.swift", raw: "main.swift")
+        XCTAssertEqual(
+            route(match, isFile: { $0 == "/root/main.swift" }),
+            .editor(path: "/root/main.swift", line: nil, column: nil)
         )
     }
 
@@ -218,30 +230,23 @@ final class TerminalLinkDetectorTests: XCTestCase {
         )
     }
 
-    func testLocalhostURLRoutingHonorsConfiguration() throws {
+    func testURLRoutingAlwaysPromptsForDestination() throws {
         let match = TerminalLinkMatch(
             kind: .url,
             target: "http://localhost:3000/app",
             raw: "http://localhost:3000/app"
         )
-        XCTAssertEqual(route(match), .webview(target: "http://localhost:3000/app"))
-
-        var configuration = WebViewConfiguration()
-        configuration.openLocalhostURLs = false
-        XCTAssertEqual(
-            route(match, configuration: configuration),
-            .system(try XCTUnwrap(URL(string: "http://localhost:3000/app")))
-        )
+        XCTAssertEqual(route(match), .prompt(try XCTUnwrap(URL(string: "http://localhost:3000/app"))))
 
         let loopback = TerminalLinkMatch(
             kind: .url,
             target: "http://127.0.0.1:8080",
             raw: "http://127.0.0.1:8080"
         )
-        XCTAssertEqual(route(loopback), .webview(target: "http://127.0.0.1:8080"))
+        XCTAssertEqual(route(loopback), .prompt(try XCTUnwrap(URL(string: "http://127.0.0.1:8080"))))
     }
 
-    func testPublicURLRoutingFollowsConfiguredAction() throws {
+    func testPublicURLRoutingAlwaysPrompts() throws {
         let match = TerminalLinkMatch(
             kind: .url,
             target: "https://example.com",
@@ -253,13 +258,9 @@ final class TerminalLinkDetectorTests: XCTestCase {
 
         var configuration = WebViewConfiguration()
         configuration.publicURLAction = .webview
-        XCTAssertEqual(
-            route(match, configuration: configuration),
-            .webview(target: "https://example.com")
-        )
-
+        XCTAssertEqual(route(match, configuration: configuration), .prompt(url))
         configuration.publicURLAction = .system
-        XCTAssertEqual(route(match, configuration: configuration), .system(url))
+        XCTAssertEqual(route(match, configuration: configuration), .prompt(url))
     }
 
     // MARK: - Helpers
