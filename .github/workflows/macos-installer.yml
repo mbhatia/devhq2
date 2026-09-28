@@ -188,6 +188,8 @@ jobs:
           test -L "$mount_dir/Applications"
           test "$(readlink "$mount_dir/Applications")" = /Applications
           test -f "$app/Contents/Resources/DevHQ.icns"
+          test -f "$app/Contents/Resources/Assets.car"
+          test "$(plutil -extract CFBundleIconName raw "$app/Contents/Info.plist")" = DevHQ
           test -d "$app/Contents/Resources/DevHQ_DevHQ.bundle"
           test -d "$app/Contents/Resources/CodeEditLanguages_CodeEditLanguages.bundle"
           test ! -e "$app/DevHQ_DevHQ.bundle"

@@ -177,8 +177,10 @@ generated resource accessors require resource bundles at the app root.
 `OUTPUT_DMG` are optional environment overrides. Use `--stage-only` to build
 and verify the app without creating a DMG.
 
-The package includes the app icon from `assets/DevHQ.icns`, SwiftPM resource
-bundles, the statically linked Lua runtime, and DevHQ, Lua, LuaSwift, and
+Packaging requires Xcode 26 or later and compiles `assets/IconSource/DevHQ.icon`
+into a layered Liquid Glass icon and a compatibility icon for older macOS
+versions. The package also includes SwiftPM resource bundles, the statically
+linked Lua runtime, and DevHQ, Lua, LuaSwift, and
 Ghostty/libghostty license notices under `DevHQ.app/Contents/Resources/legal`.
 
 ## Terminal tabs
