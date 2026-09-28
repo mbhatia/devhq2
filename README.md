@@ -216,6 +216,10 @@ git submodule update --init
 ./Scripts/bootstrap-ghostty.sh test
 ```
 
+After checking out a revision that changes the Ghostty pin, run both commands
+again. The ignored `ghostty-vt.xcframework` is not rebuilt automatically, and a
+stale copy can cause compiler errors.
+
 The bootstrap requires Zig 0.16.0, verifies Ghostty commit
 `3c47ca159368eb4a860ffe5333abdf4a85b2767b`, builds
 `ghostty-vt.xcframework`, and installs Ghostty's `xterm-ghostty` terminfo data.
