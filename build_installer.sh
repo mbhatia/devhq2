@@ -91,9 +91,10 @@ need_cmd nm
 need_cmd otool
 need_cmd plutil
 need_cmd swift
+need_cmd xcrun
 [ "$CODESIGN" = "0" ] || need_cmd codesign
 
-[ -f "$SCRIPT_DIR/assets/DevHQ.icns" ] || die "missing app icon: assets/DevHQ.icns"
+[ -f "$SCRIPT_DIR/assets/IconSource/DevHQ.icon/icon.json" ] || die "missing Icon Composer document: assets/IconSource/DevHQ.icon"
 [ -f "$SCRIPT_DIR/assets/Lua-LICENSE.txt" ] || die "missing Lua license: assets/Lua-LICENSE.txt"
 [ -f "$SCRIPT_DIR/assets/THIRD-PARTY-NOTICES.md" ] || die "missing third-party notices"
 [ -f "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/MartianMono-LICENSE.txt" ] || die "missing bundled Martian Mono license"
@@ -156,7 +157,15 @@ mkdir -p "$MACOS_DIR" "$LEGAL_DIR" "$DMG_ROOT"
 log "Assembling $APP_BUNDLE..."
 ditto "$EXECUTABLE" "$MACOS_DIR/DevHQ"
 chmod 755 "$MACOS_DIR/DevHQ"
-ditto "$SCRIPT_DIR/assets/DevHQ.icns" "$RESOURCES_DIR/DevHQ.icns"
+log "Compiling the layered app icon..."
+xcrun actool "$SCRIPT_DIR/assets/IconSource/DevHQ.icon" \
+  --compile "$RESOURCES_DIR" \
+  --platform macosx \
+  --minimum-deployment-target 13.0 \
+  --app-icon DevHQ \
+  --output-partial-info-plist "$WORK_DIR/icon-info.plist"
+[ -f "$RESOURCES_DIR/Assets.car" ] || die "the layered app icon was not compiled"
+[ -f "$RESOURCES_DIR/DevHQ.icns" ] || die "the compatibility app icon was not compiled"
 
 # Keep SwiftPM resources in the canonical signed-app resource location. The
 # patched CodeEditLanguages dependency and DevHQ's terminfo lookup prefer this
@@ -179,7 +188,7 @@ ditto "$LUA_SWIFT_LICENSE" "$LEGAL_DIR/LuaSwift-LICENSE.txt"
 ditto "$SCRIPT_DIR/Vendor/ghostty/LICENSE" "$LEGAL_DIR/Ghostty-LICENSE.txt"
 ditto "$SCRIPT_DIR/Sources/DevHQ/Resources/Fonts/MartianMono-LICENSE.txt" "$LEGAL_DIR/MartianMono-LICENSE.txt"
 ditto "$SCRIPT_DIR/assets/THIRD-PARTY-NOTICES.md" "$LEGAL_DIR/THIRD-PARTY-NOTICES.md"
-chmod 644 "$RESOURCES_DIR/DevHQ.icns" "$LEGAL_DIR"/*
+chmod 644 "$RESOURCES_DIR/DevHQ.icns" "$RESOURCES_DIR/Assets.car" "$LEGAL_DIR"/*
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -194,6 +203,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>DevHQ</string>
   <key>CFBundleIconFile</key>
   <string>DevHQ.icns</string>
+  <key>CFBundleIconName</key>
+  <string>DevHQ</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_IDENTIFIER</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -288,6 +299,7 @@ MOUNTED=1
 [ -d "$MOUNT_DIR/DevHQ.app/Contents/Resources/DevHQ_DevHQ.bundle" ] || die "mounted DMG is missing DevHQ resources"
 [ -d "$MOUNT_DIR/DevHQ.app/Contents/Resources/CodeEditLanguages_CodeEditLanguages.bundle" ] || die "mounted DMG is missing CodeEditLanguages resources"
 [ -f "$MOUNT_DIR/DevHQ.app/Contents/Resources/DevHQ.icns" ] || die "mounted DMG is missing the app icon"
+[ -f "$MOUNT_DIR/DevHQ.app/Contents/Resources/Assets.car" ] || die "mounted DMG is missing the layered app icon"
 for legal_file in DevHQ-LICENSE.txt Ghostty-LICENSE.txt Lua-LICENSE.txt LuaSwift-LICENSE.txt THIRD-PARTY-NOTICES.md; do
   [ -f "$MOUNT_DIR/DevHQ.app/Contents/Resources/legal/$legal_file" ] || die "mounted DMG is missing $legal_file"
 done
