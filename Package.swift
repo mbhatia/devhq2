@@ -25,7 +25,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/tomsci/LuaSwift.git",
-            exact: "1.0.0"
+            revision: "985e19af1ae62639e54e4ce2a9f7712a29b5432c"
         ),
         .package(
             url: "https://github.com/swiftlang/swift-syntax.git",
