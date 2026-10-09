@@ -53,7 +53,7 @@ enum DevHQFont {
         _ = registerBundledFonts
         var resolvedURLs: [URL] = []
         for font in bundledFonts {
-            guard let expectedURL = resourceBundle.url(forResource: font.resourceName, withExtension: "ttf", subdirectory: "Fonts"),
+            guard let expectedURL = DevHQResourceBundle.url(in: resourceBundle, forResource: font.resourceName, withExtension: "ttf", subdirectory: "Fonts"),
                   let resolvedURL = bundledFontURL(named: font.resourceName),
                   resolvedURL.standardizedFileURL == expectedURL.standardizedFileURL,
                   let registeredFont = NSFont(name: font.postscriptName, size: 13),

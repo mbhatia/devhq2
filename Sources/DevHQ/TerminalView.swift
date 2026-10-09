@@ -63,20 +63,18 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         italicFont = TerminalFont.italic(named: name, size: 13)
         boldItalicFont = TerminalFont.boldItalic(named: name, size: 13)
         updateFontMetrics()
-        textRenderer.invalidate()
         updateSize()
     }
 
     private func updateFontMetrics() {
-        let ctFont = font as CTFont
-        var glyph = CTFontGetGlyphWithName(ctFont, "M" as CFString)
-        var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(ctFont, .horizontal, &glyph, &advance, 1)
-        cellWidth = ceil(advance.width)
-        baseline = ceil(CTFontGetAscent(ctFont))
-        cellHeight = ceil(
-            CTFontGetAscent(ctFont) + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont) + 2
+        let metrics = TerminalFontMetrics(
+            font: font,
+            scale: window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         )
+        cellWidth = metrics.cellWidth
+        cellHeight = metrics.cellHeight
+        baseline = metrics.baseline
+        textRenderer.invalidate()
     }
 
     required init?(coder: NSCoder) { nil }
@@ -97,7 +95,15 @@ final class NativeTerminalView: NSView, NSTextInputClient {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        updateFontMetrics()
         updateSize()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateFontMetrics()
+        updateSize()
+        needsDisplay = true
     }
 
     override func setFrameSize(_ newSize: NSSize) {

@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CoreText
 import XCTest
 @testable import DevHQ
 
@@ -80,8 +81,8 @@ final class TerminalTextRendererTests: XCTestCase {
         let bitmap = try makeBitmap(width: 48, height: 32)
         let renderer = TerminalTextRenderer()
         let row = [TerminalCell(text: "A")]
-        let regular = TerminalFont.regular(named: "", size: 18)
-        let italic = TerminalFont.italic(named: "", size: 18)
+        let regular = DevHQFont.codeFont(size: 18)
+        let italic = DevHQFont.codeFont(size: 18, italic: true)
 
         renderer.draw(row: row, fonts: .init(regular: regular, bold: regular, italic: regular, boldItalic: regular),
                       cellWidth: cellWidth, baseline: baseline, rowOrigin: .zero, context: bitmap.context,
@@ -91,6 +92,89 @@ final class TerminalTextRendererTests: XCTestCase {
                       foreground: { _, _ in .white })
 
         XCTAssertEqual(renderer.cacheStatistics.layouts, 2)
+    }
+
+    func testPrivateUseGlyphsUseSymbolsFontForEveryTerminalStyleAndExplicitFont() throws {
+        let glyphs = ["\u{F179}", "\u{F07C}", "\u{F126}", "\u{F0001}"]
+        let size: CGFloat = 18
+        let defaultFonts = TerminalTextRenderer.Fonts(
+            regular: TerminalFont.regular(named: "", size: size),
+            bold: TerminalFont.bold(named: "", size: size),
+            italic: TerminalFont.italic(named: "", size: size),
+            boldItalic: TerminalFont.boldItalic(named: "", size: size)
+        )
+        let menlo = try XCTUnwrap(NSFont(name: "Menlo", size: size))
+        let explicitFonts = TerminalTextRenderer.Fonts(
+            regular: menlo, bold: menlo, italic: menlo, boldItalic: menlo
+        )
+        let styles: [(name: String, fonts: TerminalTextRenderer.Fonts, bold: Bool, italic: Bool)] = [
+            ("regular", defaultFonts, false, false),
+            ("bold", defaultFonts, true, false),
+            ("italic", defaultFonts, false, true),
+            ("bold italic", defaultFonts, true, true),
+            ("explicit Menlo", explicitFonts, false, false)
+        ]
+        let symbols = try XCTUnwrap(NSFont(name: "SymbolsNF", size: size))
+
+        for style in styles {
+            for glyph in glyphs {
+                let bitmap = try makeBitmap(width: Int(cellWidth), height: 32)
+                let renderer = TerminalTextRenderer()
+                let cell = TerminalCell(text: glyph, bold: style.bold, italic: style.italic)
+                fillBackground(bitmap.context, width: bitmap.width, height: bitmap.height)
+                renderer.draw(
+                    row: [cell], fonts: style.fonts, cellWidth: cellWidth, baseline: baseline,
+                    rowOrigin: .zero, context: bitmap.context, foreground: { _, _ in .white }
+                )
+
+                let expected = try makeBitmap(width: Int(cellWidth), height: 32)
+                fillBackground(expected.context, width: expected.width, height: expected.height)
+                drawDirectly(glyph, with: symbols, in: expected.context)
+                XCTAssertTrue(pixels(in: bitmap) == pixels(in: expected),
+                              "\(style.name) should shape \(glyph.unicodeScalars.map { String(format: "%04X", $0.value) }.joined(separator: " ")) with SymbolsNF, not a missing-glyph box.")
+            }
+        }
+    }
+
+    func testSupportedPowerlineGlyphsRetainConfiguredPrimaryFont() throws {
+        let defaultFonts = TerminalTextRenderer.Fonts(
+            regular: TerminalFont.regular(named: "", size: 18),
+            bold: TerminalFont.bold(named: "", size: 18),
+            italic: TerminalFont.italic(named: "", size: 18),
+            boldItalic: TerminalFont.boldItalic(named: "", size: 18)
+        )
+        let menlo = try XCTUnwrap(NSFont(name: "Menlo", size: 18))
+        let menloFonts = TerminalTextRenderer.Fonts(
+            regular: menlo, bold: menlo, italic: menlo, boldItalic: menlo
+        )
+        let styles: [(String, TerminalTextRenderer.Fonts, Bool, Bool)] = [
+            ("regular", defaultFonts, false, false),
+            ("bold", defaultFonts, true, false),
+            ("italic", defaultFonts, false, true),
+            ("bold italic", defaultFonts, true, true),
+            ("explicit Menlo", menloFonts, false, false)
+        ]
+
+        for glyph in ["\u{E0A0}", "\u{E0B0}", "\u{E0B1}"] {
+            for (name, fonts, bold, italic) in styles {
+                let bitmap = try makeBitmap(width: Int(cellWidth), height: 32)
+                let cell = TerminalCell(text: glyph, bold: bold, italic: italic)
+                fillBackground(bitmap.context, width: bitmap.width, height: bitmap.height)
+                TerminalTextRenderer().draw(
+                    row: [cell], fonts: fonts, cellWidth: cellWidth, baseline: baseline,
+                    rowOrigin: .zero, context: bitmap.context, foreground: { _, _ in .white }
+                )
+
+                let primary = fonts.font(for: cell)
+                let expectedFont = hasGlyph(glyph, in: primary)
+                    ? primary : try XCTUnwrap(NSFont(name: "SymbolsNF", size: primary.pointSize))
+                let expected = try makeBitmap(width: Int(cellWidth), height: 32)
+                fillBackground(expected.context, width: expected.width, height: expected.height)
+                drawDirectly(glyph, with: expectedFont, in: expected.context)
+                XCTAssertTrue(pixels(in: bitmap) == pixels(in: expected),
+                              "\(name) should preserve its primary-font rendering for supported powerline glyph \(glyph.unicodeScalars.first!.value).")
+            }
+        }
     }
 
     func testForegroundAndSelectionStyleChangesReuseCachedLayout() throws {
@@ -183,6 +267,37 @@ final class TerminalTextRendererTests: XCTestCase {
         )
     }
 
+    private func drawDirectly(_ text: String, with font: NSFont, in context: CGContext) {
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [
+            .font: font as CTFont,
+            .ligature: 0,
+            NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true
+        ]))
+        context.saveGState()
+        context.setShouldSmoothFonts(false)
+        context.setShouldSubpixelPositionFonts(true)
+        context.setShouldSubpixelQuantizeFonts(false)
+        context.setShouldAntialias(true)
+        context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        context.textPosition = .zero
+        context.setFillColor(NSColor.white.cgColor)
+        for runValue in CTLineGetGlyphRuns(line) as NSArray {
+            let run = runValue as! CTRun
+            var position = CGPoint.zero
+            CTRunGetPositions(run, CFRange(location: 0, length: 1), &position)
+            context.translateBy(x: -position.x, y: baseline)
+            CTRunDraw(run, context, CFRange(location: 0, length: CTRunGetGlyphCount(run)))
+        }
+        context.restoreGState()
+    }
+
+    private func hasGlyph(_ text: String, in font: NSFont) -> Bool {
+        var characters = Array(text.utf16)
+        var glyphs = Array(repeating: CGGlyph(), count: characters.count)
+        return CTFontGetGlyphsForCharacters(font as CTFont, &characters, &glyphs, characters.count)
+            && glyphs.allSatisfy { $0 != 0 }
+    }
+
     private func makeBitmap(width: Int, height: Int) throws -> Bitmap {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
@@ -251,7 +366,7 @@ private struct Bitmap {
     let height: Int
 }
 
-private struct Pixel {
+private struct Pixel: Equatable {
     let red: UInt8
     let green: UInt8
     let blue: UInt8

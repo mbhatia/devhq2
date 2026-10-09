@@ -35,9 +35,10 @@ The `devhq` module follows the same broad separation used by Lite XL:
 - `fonts`: installed font names for UI, code, and terminal text
 - `terminal`: terminal-tab creation
 
-Without a `fonts.ui` override, the app UI uses the macOS system font (SF Pro). The
-bundled Martian Mono font remains the default for code and terminal text; DevHQ
-does not distribute the system UI font.
+Without a `fonts.ui` override, the app UI uses the macOS system font (SF Pro).
+Code text defaults to bundled Martian Mono. Terminals use bundled JetBrains Mono
+at 13 points, with Symbols Nerd Font fallback for prompt icons. DevHQ does not
+distribute the system UI font.
 
 Lua modules below the configuration directory can be loaded normally. For example,
 `require "plugins.statusbar"` loads `~/.config/devhq/plugins/statusbar.lua`. See

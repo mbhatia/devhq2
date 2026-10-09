@@ -101,6 +101,12 @@ final class TerminalTextRenderer {
     ) {
         let layout = layout(for: row, fonts: fonts, cellWidth: cellWidth)
         context.saveGState()
+        // Match Ghostty's default rasterization without macOS optical
+        // thickening or quantizing the grid's fractional glyph positions.
+        context.setShouldSmoothFonts(false)
+        context.setShouldSubpixelPositionFonts(true)
+        context.setShouldSubpixelQuantizeFonts(false)
+        context.setShouldAntialias(true)
         // AppKit views are flipped. Core Text draws with an upward text space.
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         context.textPosition = .zero
@@ -190,7 +196,7 @@ final class TerminalTextRenderer {
             // across terminal columns.
             guard cell.width != 0 || !cell.text.isEmpty else { continue }
             let text = cell.text.isEmpty ? " " : cell.text
-            let font = fonts.font(for: cell) as CTFont
+            let font = TerminalFont.font(for: text, primary: fonts.font(for: cell)) as CTFont
             let start = attributed.length
             columnSourceStarts[column] = CFIndex(start)
             attributed.append(NSAttributedString(string: text, attributes: [
