@@ -351,6 +351,12 @@ final class NativeTerminalView: NSView, NSTextInputClient {
         )
     }
 
+    /// Handles the standard Edit > Copy responder action, which AppKit may
+    /// dispatch instead of delivering Command-C through `keyDown(with:)`.
+    @objc func copy(_ sender: Any?) {
+        copySelection()
+    }
+
     private func pasteFromClipboard() {
         guard let string = NSPasteboard.general.string(forType: .string) else { return }
         guard string.contains("\n") else { session.pasteFromUser(string); return }
